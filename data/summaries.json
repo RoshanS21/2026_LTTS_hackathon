@@ -2,110 +2,115 @@
   {
     "source": "llm",
     "model": "qwen2.5:1.5b",
-    "text": "Fault: The engine oil pressure has dropped to an unsafe level (52 kPa) for the current RPM (2146 rpm), indicating a potential failure in the oil pump or related components.\nRecommended Action: Inspect the oil pump, check for any leaks, and possibly replace faulty seals or bearings.",
-    "latency_s": 8.273146571000325,
+    "text": "Fault: The engine speed has exceeded its normal operating range.\nRecommended Action: Check for proper fuel injection, ignition timing, or exhaust system issues to ensure the engine is running efficiently without exceeding its RPM limit.",
+    "latency_s": 7.078487122002116,
     "event": {
-      "start_ts": "2026-07-05T15:04:51+00:00",
-      "end_ts": "2026-07-05T15:05:21+00:00",
+      "start_ts": "2026-07-05T19:18:02+00:00",
+      "end_ts": "2026-07-05T19:18:29+00:00",
       "asset_id": "DEERE-7R-014",
-      "duration_s": 31,
-      "start_row": 266,
-      "end_row": 296,
-      "peak_row": 296,
+      "duration_s": 28,
+      "start_row": 271,
+      "end_row": 298,
+      "peak_row": 295,
       "confirmed": true,
+      "confirm_lead_s": 15,
       "signals": {
-        "spn190_engine_speed_rpm": 2146.1,
-        "spn110_coolant_temp_c": 93.9,
-        "spn100_oil_pressure_kpa": 51.8,
-        "spn175_oil_temp_c": 125.5
+        "spn190_engine_speed_rpm": 2697.2,
+        "spn110_coolant_temp_c": 94.5,
+        "spn100_oil_pressure_kpa": 472.2,
+        "spn175_oil_temp_c": 100.7
       }
     }
   },
   {
     "source": "llm",
     "model": "qwen2.5:1.5b",
-    "text": "Fault: The engine speed exceeds its normal operating range.\nRecommended Action: Calibrate or replace faulty sensors to ensure proper engine performance monitoring.",
-    "latency_s": 4.03221283899984,
+    "text": "Fault: The engine coolant temperature is excessively high at 123\u00b0C.\nRecommended Action: Check the cooling system for leaks or blockages, ensuring proper fluid levels and circulation.",
+    "latency_s": 6.261420246999478,
     "event": {
-      "start_ts": "2026-07-05T15:08:14+00:00",
-      "end_ts": "2026-07-05T15:08:34+00:00",
+      "start_ts": "2026-07-05T19:21:17+00:00",
+      "end_ts": "2026-07-05T19:21:42+00:00",
       "asset_id": "DEERE-7R-014",
-      "duration_s": 21,
-      "start_row": 469,
-      "end_row": 489,
-      "peak_row": 488,
+      "duration_s": 26,
+      "start_row": 466,
+      "end_row": 491,
+      "peak_row": 489,
       "confirmed": true,
+      "confirm_lead_s": 12,
       "signals": {
-        "spn190_engine_speed_rpm": 2650.6,
-        "spn110_coolant_temp_c": 94.0,
-        "spn100_oil_pressure_kpa": 445.4,
-        "spn175_oil_temp_c": 97.7
+        "spn190_engine_speed_rpm": 2100.5,
+        "spn110_coolant_temp_c": 123.4,
+        "spn100_oil_pressure_kpa": 345.9,
+        "spn175_oil_temp_c": 113.8
       }
     }
   },
   {
     "source": "llm",
     "model": "qwen2.5:1.5b",
-    "text": "Fault: The engine coolant temperature is excessively high at 121\u00b0C.\nAction: Check for leaks in the cooling system, inspect the radiator or water pump, and ensure proper fluid levels and circulation.",
-    "latency_s": 6.082708393999383,
+    "text": "Fault: The engine speed exceeds its normal operating range, indicating a potential issue with the fuel injection system or related components.\nRecommended Action: Check the fuel injectors for proper operation and ensure that there are no leaks in the intake manifold or other areas where air bypasses the engine.",
+    "latency_s": 8.987548075998347,
     "event": {
-      "start_ts": "2026-07-05T15:10:29+00:00",
-      "end_ts": "2026-07-05T15:10:55+00:00",
+      "start_ts": "2026-07-05T19:31:45+00:00",
+      "end_ts": "2026-07-05T19:32:03+00:00",
       "asset_id": "DEERE-7R-014",
-      "duration_s": 27,
-      "start_row": 604,
-      "end_row": 630,
-      "peak_row": 630,
+      "duration_s": 19,
+      "start_row": 1094,
+      "end_row": 1112,
+      "peak_row": 1110,
       "confirmed": true,
+      "confirm_lead_s": 12,
       "signals": {
-        "spn190_engine_speed_rpm": 2091.5,
-        "spn110_coolant_temp_c": 121.3,
-        "spn100_oil_pressure_kpa": 321.8,
-        "spn175_oil_temp_c": 112.6
+        "spn190_engine_speed_rpm": 2628.9,
+        "spn110_coolant_temp_c": 89.0,
+        "spn100_oil_pressure_kpa": 429.9,
+        "spn175_oil_temp_c": 96.1
       }
     }
   },
   {
     "source": "llm",
     "model": "qwen2.5:1.5b",
-    "text": "Fault: The engine oil pressure has dropped to a low level (55 kPa) for an RPM of 2068, which is below the baseline value of ~340 kPa at 2100 rpm.\nRecommended Action: Check the oil levels and quality in the engine. If necessary, add or change the oil.",
-    "latency_s": 8.84361517400066,
+    "text": "Fault: The high coolant temperature (118\u00b0C) suggests a possible issue with the cooling system, possibly due to insufficient coolant or an open circuit.\nRecommended Action: Check the coolant level and ensure it is sufficient. Inspect the radiator for leaks and clean if necessary. Verify that the thermostat is functioning correctly by checking its position in the engine bay.",
+    "latency_s": 10.94140653499926,
     "event": {
-      "start_ts": "2026-07-05T15:18:33+00:00",
-      "end_ts": "2026-07-05T15:18:56+00:00",
+      "start_ts": "2026-07-05T19:36:27+00:00",
+      "end_ts": "2026-07-05T19:36:49+00:00",
       "asset_id": "DEERE-7R-014",
-      "duration_s": 24,
-      "start_row": 1088,
-      "end_row": 1111,
-      "peak_row": 1111,
+      "duration_s": 23,
+      "start_row": 1376,
+      "end_row": 1398,
+      "peak_row": 1397,
       "confirmed": true,
+      "confirm_lead_s": 11,
       "signals": {
-        "spn190_engine_speed_rpm": 2068.4,
-        "spn110_coolant_temp_c": 88.3,
-        "spn100_oil_pressure_kpa": 54.6,
-        "spn175_oil_temp_c": 121.0
+        "spn190_engine_speed_rpm": 2124.2,
+        "spn110_coolant_temp_c": 118.0,
+        "spn100_oil_pressure_kpa": 371.6,
+        "spn175_oil_temp_c": 112.1
       }
     }
   },
   {
     "source": "llm",
     "model": "qwen2.5:1.5b",
-    "text": "The high coolant temperature (119\u00b0C) suggests a possible issue with the cooling system, possibly due to insufficient circulation or blockage. Recommended action is to inspect the radiator fins for blockages and check the cooling fan operation. Ensure proper coolant level and consider flushing the system if necessary.",
-    "latency_s": 7.6325411750003695,
+    "text": "The low engine oil pressure (32 kPa) compared to baseline (340 kPa) at 2100 rpm suggests a potential failure in the oil pump or related system, possibly due to wear or malfunction. The recommended action is to inspect the oil pump and associated components for signs of damage or degradation, and consider replacing any faulty parts as needed.",
+    "latency_s": 11.915863247999368,
     "event": {
-      "start_ts": "2026-07-05T15:22:50+00:00",
-      "end_ts": "2026-07-05T15:23:10+00:00",
+      "start_ts": "2026-07-05T19:38:56+00:00",
+      "end_ts": "2026-07-05T19:39:29+00:00",
       "asset_id": "DEERE-7R-014",
-      "duration_s": 21,
-      "start_row": 1345,
-      "end_row": 1365,
-      "peak_row": 1365,
+      "duration_s": 34,
+      "start_row": 1525,
+      "end_row": 1558,
+      "peak_row": 1556,
       "confirmed": true,
+      "confirm_lead_s": 0,
       "signals": {
-        "spn190_engine_speed_rpm": 2178.9,
-        "spn110_coolant_temp_c": 119.3,
-        "spn100_oil_pressure_kpa": 403.7,
-        "spn175_oil_temp_c": 112.4
+        "spn190_engine_speed_rpm": 2102.4,
+        "spn110_coolant_temp_c": 92.5,
+        "spn100_oil_pressure_kpa": 31.5,
+        "spn175_oil_temp_c": 124.2
       }
     }
   }

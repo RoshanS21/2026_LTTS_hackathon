@@ -5,21 +5,27 @@ anomaly_detector.py
 Piece 3 of the LTTS edge-AI demo: turn a J1939 signal CSV (piece 2's output,
 or a live stream shaped the same way) into anomaly events.
 
-Two detectors run in parallel, on purpose:
+Three detectors run in parallel, on purpose -- each covers a failure mode
+the others miss:
   - ThresholdDetector: fixed, hand-picked safety bounds. Always available,
     always deterministic, zero dependencies beyond stdlib. This is the
     demo-safe backstop -- it cannot fail to flag a hard-red-line condition
     just because a model didn't generalize.
   - IsolationForestDetector: unsupervised sklearn model (fixed random_state,
-    so it's reproducible run-to-run) that also catches softer multi-signal
-    drift the fixed thresholds don't cover.
+    so it's reproducible run-to-run) that catches multivariate outliers the
+    fixed thresholds don't cover.
+  - CUSUMDetector: classic industrial change detection. Accumulates small
+    persistent deviations from the baseline, so it catches SLOW DRIFTS
+    (pump wear, gradual coolant loss) minutes before any hard bound breaks
+    -- the genuinely predictive tier. Sensor noise never sustains the
+    accumulation, so it stays quiet on a healthy machine.
 
-A row is flagged if EITHER detector fires (maximizes recall -- for
-predictive maintenance, a missed fault is worse than an extra alert). Each
-contiguous flagged run becomes one "event", and format_anomaly_prompt()
-turns an event into the same anomaly-summary prompt shape used in
-benchmark_edge_llm.py's USER_PROMPT, so piece 4 (LLM summary layer) can
-consume it directly.
+A row is flagged if ANY detector fires (maximizes recall -- for predictive
+maintenance, a missed fault is worse than an extra alert). Flagged runs are
+merged across short clear gaps, debounced, and become "events";
+format_anomaly_prompt() turns an event into the same anomaly-summary prompt
+shape used in benchmark_edge_llm.py's USER_PROMPT, so piece 4 (LLM summary
+layer) can consume it directly.
 
 USAGE
 -----
@@ -84,6 +90,50 @@ def isoforest_flags(features, contamination, seed=42):
     return pred == -1
 
 
+# CUSUM tuning, validated by a scenario sweep (healthy stays at zero events,
+# the slow-decline scenario is flagged ~190s before its hard threshold
+# breach): k must sit above the baseline's slow sinusoidal wander (~1.3
+# robust-z on coolant), h sets how much sustained deviation accumulates
+# before firing, and the cap bounds how long the score lingers after a
+# fault clears.
+CUSUM_K = 2.0
+CUSUM_H = 8.0
+CUSUM_CAP_MULT = 1.5
+
+
+def cusum_baseline(features):
+    """Robust per-signal location/scale (median / scaled MAD) -- the
+    'pre-trained' baseline the streaming CUSUM measures deviations against.
+    Robust stats keep a fault window in the training data from dragging the
+    baseline toward itself."""
+    med = np.median(features, axis=0)
+    mad = np.median(np.abs(features - med), axis=0) * 1.4826 + 1e-9
+    return med, mad
+
+
+class CusumDetector:
+    """Two-sided CUSUM over robust z-scores, one accumulator pair per signal.
+    step() is O(signals) per row -- built for streaming."""
+
+    def __init__(self, med, mad, k=CUSUM_K, h=CUSUM_H, cap_mult=CUSUM_CAP_MULT):
+        self.med, self.mad, self.k, self.h = med, mad, k, h
+        self.cap = h * cap_mult
+        self.s_pos = np.zeros(len(med))
+        self.s_neg = np.zeros(len(med))
+
+    def step(self, values):
+        z = (values - self.med) / self.mad
+        self.s_pos = np.minimum(np.maximum(0.0, self.s_pos + z - self.k), self.cap)
+        self.s_neg = np.minimum(np.maximum(0.0, self.s_neg - z - self.k), self.cap)
+        return bool((self.s_pos > self.h).any() or (self.s_neg > self.h).any())
+
+
+def cusum_flags(features, k=CUSUM_K, h=CUSUM_H, cap_mult=CUSUM_CAP_MULT):
+    """Batch equivalent of streaming CusumDetector.step() over every row."""
+    det = CusumDetector(*cusum_baseline(features), k=k, h=h, cap_mult=cap_mult)
+    return np.array([det.step(row) for row in features])
+
+
 def evaluate(name, flags, truth):
     tp = int(np.sum(flags & truth))
     fp = int(np.sum(flags & ~truth))
@@ -95,28 +145,38 @@ def evaluate(name, flags, truth):
     return precision, recall, f1
 
 
-def find_events(rows, features, flags, confirm_flags=None, min_duration=3):
-    """Contiguous flagged runs -> one event each, snapshotted at the row with
-    the largest overall deviation from the dataset baseline (type-agnostic --
+def find_events(rows, features, flags, confirm_flags=None, min_duration=3,
+                min_unconfirmed=8, merge_gap=3):
+    """Flagged runs -> one event each, snapshotted at the row with the
+    largest overall deviation from the dataset baseline (type-agnostic --
     a real detector doesn't know the injected label).
 
     `confirm_flags` (typically the deterministic threshold flags) marks an
     event "confirmed" if any row in its window also breached a hard safety
-    bound. Events flagged only by the ML side (no threshold breach anywhere
-    in the window) are "unconfirmed" -- soft/statistical alerts that
-    downstream consumers should treat with less confidence.
+    bound; `confirm_lead_s` records how long the statistical side had been
+    flagging before that first hard breach -- the predictive lead time.
+    Events flagged only by the statistical side (no threshold breach
+    anywhere in the window) are "unconfirmed" -- soft alerts that downstream
+    consumers should treat with less confidence.
 
-    `min_duration` (rows) debounces the statistical detector: an isolated
-    1-2s flagged blip is sensor noise, not a fault -- real faults persist.
-    On this data every injected fault yields a >=20s run while every
-    IsolationForest false positive is a 1-2s blip, so a 3s floor separates
-    them perfectly. Runs shorter than the floor are dropped."""
+    Hysteresis keeps events clean, with all floors counted in FLAGGED rows
+    (a merged pair of 1s blips is still just 2 rows of evidence):
+      - `merge_gap` (rows): runs separated by a short clear gap are the same
+        physical fault flickering around the detection boundary, so they
+        merge into one event instead of spamming one card per flicker.
+      - `min_duration`: evidence floor for confirmed events. A hard safety
+        breach is strong evidence, so this stays low.
+      - `min_unconfirmed`: evidence floor for statistical-only events. A
+        pure-ML claim needs sustained support; on this data real drifts
+        sustain 100+ flagged rows while noise chains muster a handful, so
+        an 8-row floor separates them (validated across all scenarios)."""
     mean = features.mean(axis=0)
     std = features.std(axis=0) + 1e-9
     zscores = np.abs((features - mean) / std)
     severity = zscores.max(axis=1)
 
-    events = []
+    # Contiguous flagged runs...
+    runs = []
     i = 0
     n = len(flags)
     while i < n:
@@ -126,11 +186,27 @@ def find_events(rows, features, flags, confirm_flags=None, min_duration=3):
         start = i
         while i < n and flags[i]:
             i += 1
-        end = i  # exclusive
-        if end - start < min_duration:
+        runs.append([start, i, i - start])  # end exclusive, flagged count
+    # ...merged across short clear gaps...
+    merged = []
+    for start, end, count in runs:
+        if merged and start - merged[-1][1] <= merge_gap:
+            merged[-1][1] = end
+            merged[-1][2] += count
+        else:
+            merged.append([start, end, count])
+
+    # ...then debounced (per-tier evidence floors) and turned into events.
+    events = []
+    for start, end, count in merged:
+        confirmed, lead = True, 0
+        if confirm_flags is not None:
+            window = confirm_flags[start:end]
+            confirmed = bool(window.any())
+            lead = int(np.argmax(window)) if confirmed else None
+        if count < (min_duration if confirmed else min_unconfirmed):
             continue
         peak = start + int(np.argmax(severity[start:end]))
-        confirmed = bool(confirm_flags[start:end].any()) if confirm_flags is not None else True
         events.append({
             "start_ts": rows[start]["timestamp"],
             "end_ts": rows[end - 1]["timestamp"],
@@ -140,6 +216,7 @@ def find_events(rows, features, flags, confirm_flags=None, min_duration=3):
             "end_row": end - 1,
             "peak_row": peak,
             "confirmed": confirmed,
+            "confirm_lead_s": lead,
             "signals": {
                 col: float(rows[peak][col]) for col in FEATURE_COLUMNS
             },
@@ -165,19 +242,26 @@ def truth_windows(truth):
 
 
 def event_metrics(events, truth):
-    """Event-level scoring -- the number that matters for maintenance: of the
-    injected fault windows, how many produced an event (caught), and how many
-    events matched no real fault (false alarms)."""
+    """Event-level scoring -- the numbers that matter for maintenance: of the
+    injected fault windows, how many produced an event (caught); how many
+    CONFIRMED events matched no real fault (false alarms -- these fire the
+    GPIO alarm and cost an LLM call); and how many unconfirmed events matched
+    no real fault (soft flags -- monitor notes only, cheap by design)."""
     windows = truth_windows(truth)
+
+    def overlaps_truth(e):
+        return any(e["start_row"] < we and e["end_row"] >= ws
+                   for (ws, we) in windows)
+
     caught = sum(
         1 for (ws, we) in windows
         if any(e["start_row"] < we and e["end_row"] >= ws for e in events)
     )
-    false_alarms = sum(
-        1 for e in events
-        if not any(e["start_row"] < we and e["end_row"] >= ws for (ws, we) in windows)
-    )
-    return caught, len(windows), false_alarms
+    false_alarms = sum(1 for e in events
+                       if e["confirmed"] and not overlaps_truth(e))
+    soft_flags = sum(1 for e in events
+                     if not e["confirmed"] and not overlaps_truth(e))
+    return caught, len(windows), false_alarms, soft_flags
 
 
 def format_anomaly_prompt(event):
@@ -248,7 +332,12 @@ def main():
     ap.add_argument("--events-out", default="data/detected_events.json")
     ap.add_argument("--contamination", type=float, default=0.08)
     ap.add_argument("--min-duration", type=int, default=3,
-                     help="Debounce: drop flagged runs shorter than this many rows")
+                     help="Evidence floor (flagged rows) for confirmed events")
+    ap.add_argument("--min-unconfirmed", type=int, default=8,
+                     help="Evidence floor (flagged rows) for statistical-only events")
+    ap.add_argument("--merge-gap", type=int, default=3,
+                     help="Hysteresis: merge flagged runs separated by clear "
+                          "gaps up to this many rows")
     ap.add_argument("--stream", action="store_true",
                      help="Print a simulated live pass over the rows instead of a batch report")
     ap.add_argument("--speed", type=float, default=50.0,
@@ -265,7 +354,8 @@ def main():
 
     t_flags = threshold_flags(features)
     if_flags = isoforest_flags(features, args.contamination)
-    combined = t_flags | if_flags
+    cu_flags = cusum_flags(features)
+    combined = t_flags | if_flags | cu_flags
 
     if args.stream:
         run_stream(rows, features, combined, args.speed)
@@ -276,24 +366,32 @@ def main():
     print("\nDetector performance vs. ground truth:")
     evaluate("threshold-only", t_flags, truth)
     evaluate("isoforest-only", if_flags, truth)
+    evaluate("cusum-only", cu_flags, truth)
     evaluate("combined (OR)", combined, truth)
 
     raw_events = find_events(rows, features, combined, confirm_flags=t_flags,
-                             min_duration=1)
+                             min_duration=1, min_unconfirmed=1,
+                             merge_gap=args.merge_gap)
     events = find_events(rows, features, combined, confirm_flags=t_flags,
-                         min_duration=args.min_duration)
+                         min_duration=args.min_duration,
+                         min_unconfirmed=args.min_unconfirmed,
+                         merge_gap=args.merge_gap)
     debounced = len(raw_events) - len(events)
-    caught, total, false_alarms = event_metrics(events, truth)
+    caught, total, false_alarms, soft_flags = event_metrics(events, truth)
     print(f"\nEvent-level (what a maintenance team acts on):")
     print(f"  fault windows caught: {caught}/{total}   "
-          f"false-alarm events: {false_alarms}   "
-          f"noise blips debounced (<{args.min_duration}s): {debounced}")
+          f"false alarms (confirmed, no real fault): {false_alarms}   "
+          f"soft flags (monitor-only, no real fault): {soft_flags}   "
+          f"noise blips debounced: {debounced}")
 
     print(f"\n{len(events)} anomaly event(s) detected:")
     for e in events:
         tag = "confirmed" if e["confirmed"] else "unconfirmed (ML-only)"
+        lead = ""
+        if e["confirmed"] and e["confirm_lead_s"]:
+            lead = f"  (ML flagged {e['confirm_lead_s']}s before hard breach)"
         print(f"  [{e['start_ts']} -> {e['end_ts']}]  {e['duration_s']}s  "
-              f"asset={e['asset_id']}  {tag}")
+              f"asset={e['asset_id']}  {tag}{lead}")
 
     with open(args.events_out, "w") as f:
         json.dump(events, f, indent=2)

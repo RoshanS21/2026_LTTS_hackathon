@@ -17,29 +17,53 @@ being available.
 
 | Claim | Number |
 |---|---|
-| Fault windows detected (vs. ground truth) | **5/5**, 0 false-alarm events, 19 noise blips debounced |
-| Row-level detection (combined OR) | precision 0.87 · recall 0.83 (threshold-only: precision 1.00) |
-| Per-row inference cost (threshold + IsolationForest) | ~3.4 ms — real-time at 1 Hz with ~300× headroom |
-| Edge-LLM summary latency (`qwen2.5:1.5b`, on-Pi) | **~5.8 s median** per 2-sentence diagnosis |
-| Bandwidth: raw J1939 vs. uplinked summaries | 121 KB / 30-min window raw vs. ~2.9 KB of summaries — **~97.6% less uplink** |
+| Fault windows detected (all 4 scenarios combined) | **13/13**, 0 false alarms, 0 soft flags |
+| Predictive lead time (slow-decline scenario) | drift flagged **193 s before** the hard safety threshold broke |
+| Noise robustness (healthy scenario) | 0 events, 0 alarms; 90 noise blips debounced, injected sensor glitches ignored |
+| Per-row inference cost (threshold + IsolationForest + CUSUM) | ~4 ms — real-time at 1 Hz with ~250× headroom |
+| Edge-LLM summary latency (`qwen2.5:1.5b`, on-Pi) | **~6–12 s** per 2-sentence diagnosis |
+| Bandwidth: raw J1939 vs. uplinked summaries | ~121 KB / 30-min window raw vs. ~3 KB of summaries — **~97% less uplink** |
 
-Row-level recall < 1.0 is expected and honest: overheat faults ramp in
-gradually, so the earliest rows of a fault window are genuinely
-indistinguishable from normal. Event-level (5/5) is what a maintenance team
-acts on. The dashboard recomputes all of these live on every run.
+Row-level recall is deliberately not the headline (0.78–0.83 depending on
+scenario): faults ramp in gradually, so the earliest rows of a fault window
+are genuinely indistinguishable from normal. Event-level detection is what a
+maintenance team acts on. The dashboard recomputes all of these live on
+every run.
+
+## Demo scenarios
+
+Four datasets, four stories — pick one with `--csv`:
+
+| Scenario | Command | What it shows |
+|---|---|---|
+| **mixed** (default) | `python3 dashboard.py` | 5 hard faults across all three types; 5/5 caught, LLM diagnosis per fault, GPIO alarm per fault. |
+| **degradation** | `python3 dashboard.py --csv data/scenarios/degradation.csv` | The predictive-maintenance crown jewel: a slow oil-pump-wear drift. Watch the event open as MONITOR, escalate to a GPIO ALARM when the hard bound finally breaks, and the card report *"drift flagged 193 s before safety breach."* |
+| **healthy** | `python3 dashboard.py --csv data/scenarios/healthy.csv` | A healthy machine with injected 1–2 s sensor glitches: zero events, zero alarms, zero LLM calls, 100% of telemetry kept on-device. The system knows when to shut up. |
+| **stress** | `python3 dashboard.py --csv data/scenarios/stress.csv` | 7 faults + 5 glitches in 30 min: every fault caught, every glitch debounced, the edge LLM keeps up. |
+
+All four are committed under `data/`; regenerate any time with
+`python3 j1939_generator.py --all` (fixed seed, fully reproducible).
 
 ## Why this design
 
-- **Anomaly detection is deterministic and demo-safe.** The only part of the
-  pipeline that's allowed to fail live is the LLM summary — it only adds a
-  natural-language gloss on top of a decision already made by a fixed
-  threshold + IsolationForest detector, never the fault call itself.
-- **Debounced, tiered alerts.** Flagged runs shorter than 3 s are treated as
-  sensor noise and suppressed (on this data every real fault persists ≥ 20 s,
-  every false positive is a 1–2 s blip). Surviving events are `confirmed`
-  (hard safety bound breached → GPIO alarm) or `unconfirmed` (ML-only →
-  monitor note, no alarm). A ramping fault escalates live: MONITOR first,
-  ALARM the moment a hard threshold breaks — no debounce on safety bounds.
+- **Three detection tiers, each covering what the others miss.** A fixed
+  threshold detector (deterministic safety net — cannot miss a hard red-line
+  no matter what the models do), an IsolationForest (multivariate outliers),
+  and a CUSUM drift detector (classic industrial change detection — catches
+  slow degradation like pump wear *minutes* before any hard bound breaks,
+  because small persistent deviations accumulate while sensor noise never
+  sustains). The LLM only adds a natural-language gloss on top of decisions
+  already made — it is the one part of the pipeline allowed to fail live.
+- **Debounced, tiered alerts.** Flagged runs merge across short clear gaps
+  (one flickering fault ≠ five cards) and need an evidence floor of flagged
+  rows before becoming an event — a low bar for threshold-confirmed events,
+  a higher one for statistical-only claims. Surviving events are `confirmed`
+  (hard safety bound breached → GPIO alarm) or `unconfirmed` (statistical →
+  monitor note, no alarm). A drifting fault escalates live: MONITOR first,
+  ALARM the moment a hard threshold breaks — safety bounds get no debounce —
+  and the card reports the predictive lead time. All hysteresis parameters
+  were validated by a sweep across all four scenarios (healthy must stay at
+  zero events, every fault must be caught, degradation must keep ≥60 s lead).
 - **A real perceive → decide → act loop.** `edge_actuator.py`'s policy is a
   pure function from event → action; the GPIO backend degrades to a mock
   that still logs every decision, so the agentic loop is judge-visible on
@@ -57,10 +81,10 @@ acts on. The dashboard recomputes all of these live on every run.
 | # | File | What it does |
 |---|------|---------------|
 | 1 | `benchmark_edge_llm.py` | Benchmarks small Ollama models on this Pi to decide whether the LLM should run on-device (Option A) or offload to a gateway (Option B). |
-| 2 | `j1939_generator.py` | Generates a reproducible synthetic J1939 signal CSV with injected anomalies (`low_oil_pressure`, `overheat`, `overspeed`) and ground-truth labels. |
-| 3 | `anomaly_detector.py` | Flags anomalies with a fixed-threshold detector (deterministic safety net) and an IsolationForest (catches softer multi-signal drift), debounces sub-3s noise blips, tags each event `confirmed`/unconfirmed, reports row- and event-level metrics, and formats LLM-ready prompts. |
+| 2 | `j1939_generator.py` | Generates reproducible synthetic J1939 CSVs by scenario (`mixed`/`healthy`/`degradation`/`stress`) with injected hard faults, a slow-drift fault, benign sensor glitches, and ground-truth labels. |
+| 3 | `anomaly_detector.py` | Flags anomalies with three parallel detectors (fixed thresholds, IsolationForest, streaming CUSUM), merges/debounces flagged runs, tags each event `confirmed`/unconfirmed with predictive lead time, reports row- and event-level metrics, and formats LLM-ready prompts. |
 | 4 | `llm_summary.py` | Turns each event into a summary: LLM call for confirmed faults, a plain monitor note for unconfirmed ML-only flags, and a templated fallback if the LLM is unreachable or too slow. |
-| 5 | `dashboard.py` | Replays the CSV **row-by-row through live on-device detection** (threshold check + IsolationForest predict per row), streams events to a Flask page as they fire, dispatches LLM summaries in the background, drives the GPIO actuator, and shows live sparklines, run stats, a bandwidth ledger, and the perceive→decide→act log. |
+| 5 | `dashboard.py` | Replays any scenario CSV **row-by-row through live on-device detection** (threshold check + IsolationForest predict + incremental CUSUM step per row), streams events to a Flask page as they fire, dispatches LLM summaries in the background, drives the GPIO actuator, and shows live sparklines, run stats, a bandwidth ledger, and the perceive→decide→act log. |
 | 6 | `edge_actuator.py` | The "act" step: a pure decision policy plus a GPIO alarm (LED/buzzer/relay on GPIO17 by default) with a mock fallback and a judge-visible action log. `--test` gives a 3-pulse hardware self-test. |
 
 ## Decisions already made (see each script's docstring for detail)
@@ -101,8 +125,8 @@ sudo apt install -y python3-sklearn python3-flask python3-numpy python3-gpiozero
 # 1. Decide Option A vs B on this hardware
 python3 benchmark_edge_llm.py
 
-# 2. Generate the demo dataset (fixed --seed => reproducible)
-python3 j1939_generator.py --out data/demo_run.csv
+# 2. Generate the demo datasets (fixed --seed => reproducible)
+python3 j1939_generator.py --all
 
 # 3. Run detection standalone (prints row- and event-level metrics vs. ground truth)
 python3 anomaly_detector.py --csv data/demo_run.csv
@@ -122,8 +146,9 @@ python3 dashboard.py --speed 60 --no-open --no-gpio   # headless / no hardware
 
 ## Data
 
-`data/demo_run.csv`, `data/detected_events.json`, and `data/summaries.json`
-are committed as a known-good snapshot — the recorded-backup fallback if the
-live pipeline can't run on stage. They're fully reproducible from
-`j1939_generator.py --seed 13` (the default) plus the piece 3/4 scripts, so
-delete and regenerate them any time you want a fresh run.
+`data/demo_run.csv`, `data/scenarios/*.csv`, `data/detected_events.json`,
+and `data/summaries.json` are committed as a known-good snapshot — the
+recorded-backup fallback if the live pipeline can't run on stage. They're
+fully reproducible from `j1939_generator.py --all` (fixed default seed)
+plus the piece 3/4 scripts, so delete and regenerate them any time you want
+a fresh run.

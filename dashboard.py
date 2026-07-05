@@ -43,8 +43,9 @@ from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
 from anomaly_detector import (
-    COOLANT_C_MAX, FEATURE_COLUMNS, OIL_KPA_MIN, RPM_MAX, event_metrics,
-    find_events, load_csv, threshold_flags,
+    COOLANT_C_MAX, FEATURE_COLUMNS, OIL_KPA_MIN, RPM_MAX, CusumDetector,
+    cusum_baseline, cusum_flags, event_metrics, find_events, load_csv,
+    threshold_flags,
 )
 from benchmark_edge_llm import DEFAULT_HOST
 from edge_actuator import ALARM_PIN, Actuator
@@ -157,23 +158,29 @@ def run_pipeline(args, actuator):
     truth = np.array([r.get("is_anomaly") == "1" for r in rows])
     row_bytes = row_byte_lengths(args.csv)
 
-    # Pre-train the statistical model (offline step in a real deployment);
-    # scoring below happens per-row inside the replay loop.
+    # Pre-train the statistical models (offline step in a real deployment);
+    # scoring below happens per-row inside the replay loop: threshold check,
+    # IsolationForest predict, and an incremental CUSUM step.
     scaler = StandardScaler().fit(features)
     scaled = scaler.transform(features)
     model = IsolationForest(n_estimators=200, contamination=args.contamination,
                             random_state=42).fit(scaled)
+    cusum = CusumDetector(*cusum_baseline(features))
 
     # Whole-run detector quality vs. ground truth, shown in the header.
     # Event-level is the number a maintenance team cares about: fault windows
-    # caught and false-alarm events after debouncing (MIN_DURATION).
+    # caught, false alarms, and soft flags after the evidence floors.
     t_flags_all = threshold_flags(features)
-    combined_all = t_flags_all | (model.predict(scaled) == -1)
+    combined_all = (t_flags_all | (model.predict(scaled) == -1)
+                    | cusum_flags(features))
     precision, recall = detector_metrics(combined_all, truth)
     batch_events = find_events(rows, features, combined_all,
                                confirm_flags=t_flags_all,
-                               min_duration=args.min_duration)
-    caught, total_windows, false_alarms = event_metrics(batch_events, truth)
+                               min_duration=args.min_duration,
+                               min_unconfirmed=args.min_unconfirmed,
+                               merge_gap=args.merge_gap)
+    caught, total_windows, false_alarms, soft_flags = event_metrics(
+        batch_events, truth)
 
     # Peak-severity ranking for event snapshots (baseline stats are part of
     # the pre-trained model, same as the scaler).
@@ -188,7 +195,8 @@ def run_pipeline(args, actuator):
         s["stats"] = {
             "precision": precision, "recall": recall,
             "windows_caught": caught, "windows_total": total_windows,
-            "false_alarms": false_alarms, "debounced": 0,
+            "false_alarms": false_alarms, "soft_flags": soft_flags,
+            "debounced": 0,
             "model": args.model, "llm_median_s": None,
             "raw_bytes": 0, "uplink_bytes": 0, "summaries_done": 0,
             "actuator_backend": actuator.backend, "alarm_pin": actuator.pin,
@@ -202,22 +210,28 @@ def run_pipeline(args, actuator):
 
     history = {col: [] for col in FEATURE_COLUMNS}
     # Pending runs are debounced before they become visible events: a run is
-    # "promoted" (card + actuation) once it persists >= min_duration rows, or
-    # immediately on a hard threshold breach (safety bounds get no debounce).
-    open_event = None  # {"start": i, "confirmed": bool, "promoted": bool, "state_idx"}
+    # "promoted" (card + actuation) immediately on a hard threshold breach
+    # (safety bounds get no debounce), or once it accumulates enough flagged
+    # rows for a statistical-only claim. Runs separated by clear gaps up to
+    # merge_gap rows are one flickering fault, not several.
+    open_event = None
 
-    def close_event(i):
+    def close_event():
         """Snapshot the finished window at its peak-severity row and hand it
         to the summary worker; release the alarm."""
-        start, end = open_event["start"], i  # end exclusive
+        start = open_event["start"]
+        end = open_event["last_flag"] + 1  # exclusive
         peak = start + int(np.argmax(severity[start:end]))
+        confirmed = open_event["confirmed"]
         event = {
             "start_ts": rows[start]["timestamp"],
             "end_ts": rows[end - 1]["timestamp"],
             "asset_id": rows[peak]["asset_id"],
             "duration_s": end - start,
             "peak_row": peak,
-            "confirmed": open_event["confirmed"],
+            "confirmed": confirmed,
+            "confirm_lead_s": (open_event["first_confirm"] - start
+                               if confirmed else None),
             "signals": {c: float(rows[peak][c]) for c in FEATURE_COLUMNS},
         }
         idx = open_event["state_idx"]
@@ -237,7 +251,9 @@ def run_pipeline(args, actuator):
         signals = {c: float(row[c]) for c in FEATURE_COLUMNS}
         # --- live per-row detection (the actual edge inference step) ---
         t_hit = bool(t_flags_all[i])
-        flagged = t_hit or bool(model.predict(scaled[i:i + 1])[0] == -1)
+        cusum_hit = cusum.step(features[i])  # stateful: must run every row
+        flagged = (t_hit or cusum_hit
+                   or bool(model.predict(scaled[i:i + 1])[0] == -1))
 
         for c in FEATURE_COLUMNS:
             history[c].append(round(signals[c], 1))
@@ -249,20 +265,30 @@ def run_pipeline(args, actuator):
 
         if flagged:
             if open_event is None:
-                open_event = {"start": i, "confirmed": False,
-                              "promoted": False, "state_idx": None}
+                open_event = {"start": i, "last_flag": i, "flag_count": 0,
+                              "confirmed": False, "first_confirm": None,
+                              "promoted": False, "state_idx": None,
+                              "actuated_confirmed": False}
+            open_event["last_flag"] = i
+            open_event["flag_count"] += 1
+            if t_hit and open_event["first_confirm"] is None:
+                open_event["first_confirm"] = i
             open_event["confirmed"] = open_event["confirmed"] or t_hit
             run_len = i - open_event["start"] + 1
 
             if not open_event["promoted"] and (
-                    open_event["confirmed"] or run_len >= args.min_duration):
+                    open_event["confirmed"]
+                    or open_event["flag_count"] >= args.min_unconfirmed):
                 open_event["promoted"] = True
                 open_event["state_idx"] = len(STATE["events"])
+                lead = (open_event["first_confirm"] - open_event["start"]
+                        if open_event["confirmed"] else None)
                 snapshot = {
                     "start_ts": rows[open_event["start"]]["timestamp"],
                     "end_ts": row["timestamp"],
                     "asset_id": row["asset_id"], "duration_s": run_len,
                     "peak_row": i, "confirmed": open_event["confirmed"],
+                    "confirm_lead_s": lead,
                     "signals": signals,
                 }
 
@@ -274,36 +300,42 @@ def run_pipeline(args, actuator):
                     })
                 _mutate(open_card)
                 actuator.handle_event(snapshot)  # alarm if confirmed, else log MONITOR
-            elif open_event["promoted"] and t_hit and not open_event.get("actuated_confirmed"):
+                open_event["actuated_confirmed"] = open_event["confirmed"]
+            elif (open_event["promoted"] and t_hit
+                    and not open_event["actuated_confirmed"]):
+                # Statistical detectors flagged first; the hard threshold
+                # breach upgrades the event to confirmed mid-window --
+                # actuate now and record the predictive lead time.
                 idx = open_event["state_idx"]
-                was_unconfirmed = not STATE["events"][idx]["event"]["confirmed"]
-                if was_unconfirmed:
-                    # ML flagged first; a hard threshold breach upgrades the
-                    # event to confirmed mid-window -- actuate now, not at close.
-                    def upgrade(s):
-                        s["events"][idx]["event"]["confirmed"] = True
-                    _mutate(upgrade)
-                    actuator.handle_event({"confirmed": True,
-                                           "asset_id": row["asset_id"]})
+                lead = i - open_event["start"]
+
+                def upgrade(s):
+                    ev = s["events"][idx]["event"]
+                    ev["confirmed"] = True
+                    ev["confirm_lead_s"] = lead
+                _mutate(upgrade)
+                actuator.handle_event({"confirmed": True,
+                                       "asset_id": row["asset_id"]})
                 open_event["actuated_confirmed"] = True
-        elif open_event is not None:
+
             if open_event["promoted"]:
-                close_event(i)
+                idx = open_event["state_idx"]
+
+                def extend(s):
+                    ev = s["events"][idx]["event"]
+                    ev["end_ts"] = row["timestamp"]
+                    ev["duration_s"] = run_len
+                _mutate(extend)
+        elif open_event is not None and (
+                i - open_event["last_flag"] > args.merge_gap):
+            if open_event["promoted"]:
+                close_event()
             else:
-                # Run died before the debounce floor: noise blip, no event.
+                # Run died before its evidence floor: noise blip, no event.
                 def bump(s):
                     s["stats"]["debounced"] += 1
                 _mutate(bump)
             open_event = None
-
-        if open_event is not None and open_event["promoted"]:
-            idx = open_event["state_idx"]
-
-            def extend(s):
-                ev = s["events"][idx]["event"]
-                ev["end_ts"] = row["timestamp"]
-                ev["duration_s"] = i - open_event["start"] + 1
-            _mutate(extend)
 
         def tick(s):
             s["row"] = i + 1
@@ -314,7 +346,7 @@ def run_pipeline(args, actuator):
         _mutate(tick)
 
     if open_event is not None and open_event["promoted"]:
-        close_event(n)
+        close_event()
     worker.queue.join()
 
     # If any events fired the actuator was exercised: log MONITOR events too.
@@ -417,12 +449,14 @@ function renderTiles(d) {
   const st = d.stats || {};
   const saved = st.raw_bytes > 0
     ? (100 * (1 - st.uplink_bytes / st.raw_bytes)).toFixed(1) + '%' : '--';
+  const noFaults = st.windows_total === 0;
   const tiles = [
     ['Faults caught (vs ground truth)',
-     st.windows_total != null ? `${st.windows_caught}/${st.windows_total}` : '--',
+     st.windows_total == null ? '--'
+       : noFaults ? 'clean run' : `${st.windows_caught}/${st.windows_total}`,
      (st.false_alarms ?? '--') + ' false alarms \\u00b7 ' +
-       (st.debounced ?? 0) + ' noise blips debounced \\u00b7 row recall ' +
-       (st.recall != null ? st.recall.toFixed(2) : '--')],
+       (st.soft_flags ?? 0) + ' soft flags \\u00b7 ' +
+       (st.debounced ?? 0) + ' noise blips debounced'],
     ['Edge LLM latency',
      st.llm_median_s != null ? st.llm_median_s.toFixed(2) + ' s' : '--',
      'median per summary \\u00b7 ' + (st.model || '') + ' on-Pi'],
@@ -515,6 +549,7 @@ function renderEvents(d) {
       ${r.text ? `<div class="summary">${r.text}</div>` : ''}
       <div class="meta">${r.event.start_ts} \\u2192 ${r.event.end_ts}
         &middot; ${r.event.duration_s}s window
+        ${r.event.confirm_lead_s > 0 ? '&middot; <b>drift flagged ' + r.event.confirm_lead_s + 's before safety breach</b>' : ''}
         ${r.latency_s != null ? '&middot; summary in ' + r.latency_s.toFixed(2) + 's' : ''}</div>
     </div>`;
   }
@@ -580,8 +615,13 @@ def main():
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     ap.add_argument("--contamination", type=float, default=0.08)
     ap.add_argument("--min-duration", type=int, default=3,
-                    help="Debounce: rows a run must persist before it becomes "
-                         "an event (hard threshold breaches skip the debounce)")
+                    help="Evidence floor (flagged rows) for confirmed events "
+                         "in batch stats; live hard breaches promote instantly")
+    ap.add_argument("--min-unconfirmed", type=int, default=8,
+                    help="Evidence floor (flagged rows) before a "
+                         "statistical-only run becomes a monitor event")
+    ap.add_argument("--merge-gap", type=int, default=3,
+                    help="Hysteresis: clear rows tolerated inside one event")
     ap.add_argument("--port", type=int, default=5000)
     ap.add_argument("--speed", type=float, default=30.0,
                     help="Replay speed multiplier; 30x plays the 30-min dataset "

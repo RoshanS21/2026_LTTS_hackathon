@@ -26,17 +26,37 @@ Also done along the way:
 - data/summaries.json snapshot regenerated with real LLM output (was all
   fallback templates).
 
+## Done (2026-07-05, session 2)
+
+4. ~~Scenario variety~~ — j1939_generator.py now has 4 scenario presets
+   (mixed / healthy / degradation / stress), `--all` regenerates every CSV.
+   New anomaly kinds: slow oil_decline drift + benign 1-2s sensor glitches
+   (labeled NOT anomalous, stay inside hard bounds by design).
+5. CUSUM drift detector added as a third tier (k=2.0, h=8.0, robust
+   median/MAD baseline) — catches the slow decline 193s before the hard
+   threshold. All hysteresis (merge_gap=3, evidence floors 3 confirmed /
+   8 unconfirmed flagged rows) validated by a sweep across all scenarios.
+6. Predictive lead time ("drift flagged Ns before safety breach") computed
+   in both batch and streaming paths and shown on event cards.
+7. False alarms (confirmed, GPIO fires) now counted separately from soft
+   flags (monitor-only). Healthy scenario tile reads "clean run".
+8. LLM timeout 10s -> 15s (a 12s real diagnosis beats an instant template;
+   fallback still covers a truly stuck LLM).
+
+Live dry run from the Pi's own screen was done by Roshan (browser tab
+auto-opened, feed ran) — before the next GPIO demo, kill any old
+`python3 dashboard.py` still running, it holds GPIO17 and forces the mock
+backend ('GPIO busy').
+
 ## Remaining
 
-### 1. Dry-run dashboard.py from the Pi's own screen before the real demo
-Only ever validated over SSH with `--no-open`. The "browser tab auto-opens"
-behavior has never been observed live — confirmed only that a desktop session
-(labwc/Wayland) exists. Do one full dry run from the Pi's physical
-keyboard/monitor before showtime. While there, confirm the LED on GPIO17
-actually blinks during the two overheat events and one overspeed event
-(the ALARM_ON log entries are already verified).
-
-### 2. (Optional polish) Demo script for the pitch
-60-second walkthrough: point at live sparklines -> first fault fires ->
-LED blinks + card appears -> LLM diagnosis fills in -> end on the stats
-tiles (5/5, 97.6% bandwidth saved). Practice once at --speed 30.
+### Demo script for the pitch (optional polish)
+Suggested 90-second arc, all verified working:
+1. `python3 dashboard.py --csv data/scenarios/healthy.csv` (10s at high
+   speed): "on a healthy machine it stays silent — 90 glitches debounced,
+   zero alarms, zero bytes uplinked."
+2. `python3 dashboard.py --csv data/scenarios/degradation.csv`: the crown
+   jewel — MONITOR card opens on drift, LED ALARM fires when the bound
+   breaks, card says "drift flagged 193s before safety breach."
+3. End on mixed (default) stats tiles: 5/5 faults, 0 false alarms, ~97%
+   bandwidth saved, ~6-12s on-Pi LLM diagnosis.

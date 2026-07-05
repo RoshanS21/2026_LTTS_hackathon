@@ -29,14 +29,20 @@ import urllib.request
 import numpy as np
 
 from anomaly_detector import (
-    COOLANT_C_MAX, FEATURE_COLUMNS, OIL_KPA_MIN, RPM_MAX, find_events,
-    format_anomaly_prompt, isoforest_flags, load_csv, threshold_flags,
+    COOLANT_C_MAX, FEATURE_COLUMNS, OIL_KPA_MIN, RPM_MAX, cusum_flags,
+    find_events, format_anomaly_prompt, isoforest_flags, load_csv,
+    threshold_flags,
 )
 from benchmark_edge_llm import DEFAULT_HOST, SYSTEM_PROMPT, USER_PROMPT
 
 NUM_PREDICT = 80
 DEFAULT_MODEL = "qwen2.5:1.5b"  # Option A pick from benchmark_edge_llm.py -- see memory
-DEFAULT_TIMEOUT = 10.0  # matches the Option A/B cutoff the benchmark used
+# The benchmark's Option A/B cutoff was 10s, but that was an architecture
+# decision, not a demo budget: under CPU contention (stream loop + Flask +
+# Ollama on 4 cores) a summary can take 10-12s, and a slightly late real
+# diagnosis beats an instant template. The fallback still catches a truly
+# unreachable/stuck LLM.
+DEFAULT_TIMEOUT = 15.0
 
 
 def infer_trigger(event):
@@ -152,7 +158,8 @@ def detect_events(csv_path):
     features = np.array([[float(r[c]) for c in FEATURE_COLUMNS] for r in rows])
     t_flags = threshold_flags(features)
     if_flags = isoforest_flags(features, contamination=0.08)
-    combined = t_flags | if_flags
+    cu_flags = cusum_flags(features)
+    combined = t_flags | if_flags | cu_flags
     return find_events(rows, features, combined, confirm_flags=t_flags)
 
 
