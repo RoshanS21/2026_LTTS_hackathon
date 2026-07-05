@@ -14,7 +14,7 @@ Signals mirror the SPNs already used in benchmark_edge_llm.py's demo prompt:
 USAGE
 -----
   python3 j1939_generator.py
-  python3 j1939_generator.py --out data/demo_run.csv --duration-min 30 --hz 1 --seed 42 --anomalies 5
+  python3 j1939_generator.py --out data/demo_run.csv --duration-min 30 --hz 1 --seed 13 --anomalies 5
 """
 
 import argparse
@@ -100,7 +100,10 @@ def main():
     ap.add_argument("--duration-min", type=float, default=30.0)
     ap.add_argument("--hz", type=float, default=1.0, help="Samples per second")
     ap.add_argument("--anomalies", type=int, default=5)
-    ap.add_argument("--seed", type=int, default=42)
+    # Default seed picked deliberately: 13 injects all three anomaly types
+    # (2x low_oil_pressure, 2x overheat, 1x overspeed) spread across the run,
+    # so the demo shows fault-type variety. (Seed 42 gives 5x low_oil_pressure.)
+    ap.add_argument("--seed", type=int, default=13)
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)

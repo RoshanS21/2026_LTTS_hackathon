@@ -32,7 +32,7 @@ from anomaly_detector import (
     COOLANT_C_MAX, FEATURE_COLUMNS, OIL_KPA_MIN, RPM_MAX, find_events,
     format_anomaly_prompt, isoforest_flags, load_csv, threshold_flags,
 )
-from benchmark_edge_llm import DEFAULT_HOST, SYSTEM_PROMPT
+from benchmark_edge_llm import DEFAULT_HOST, SYSTEM_PROMPT, USER_PROMPT
 
 NUM_PREDICT = 80
 DEFAULT_MODEL = "qwen2.5:1.5b"  # Option A pick from benchmark_edge_llm.py -- see memory
@@ -110,10 +110,12 @@ def call_llm(host, model, prompt, timeout):
 
 
 def warm_up(host, model):
+    # Warm with a full-size anomaly prompt (not a trivial one) so the first
+    # real summary doesn't pay cold prompt-eval costs and blow the timeout.
     print(f"Warming up {model} ...", flush=True)
     t0 = time.monotonic()
     try:
-        call_llm(host, model, "Say OK.", timeout=120)
+        call_llm(host, model, USER_PROMPT, timeout=120)
         print(f"  ready in {time.monotonic() - t0:.1f}s")
         return True
     except Exception as e:  # noqa: BLE001

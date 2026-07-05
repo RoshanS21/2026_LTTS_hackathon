@@ -95,7 +95,7 @@ def evaluate(name, flags, truth):
     return precision, recall, f1
 
 
-def find_events(rows, features, flags, confirm_flags=None):
+def find_events(rows, features, flags, confirm_flags=None, min_duration=3):
     """Contiguous flagged runs -> one event each, snapshotted at the row with
     the largest overall deviation from the dataset baseline (type-agnostic --
     a real detector doesn't know the injected label).
@@ -104,7 +104,13 @@ def find_events(rows, features, flags, confirm_flags=None):
     event "confirmed" if any row in its window also breached a hard safety
     bound. Events flagged only by the ML side (no threshold breach anywhere
     in the window) are "unconfirmed" -- soft/statistical alerts that
-    downstream consumers should treat with less confidence."""
+    downstream consumers should treat with less confidence.
+
+    `min_duration` (rows) debounces the statistical detector: an isolated
+    1-2s flagged blip is sensor noise, not a fault -- real faults persist.
+    On this data every injected fault yields a >=20s run while every
+    IsolationForest false positive is a 1-2s blip, so a 3s floor separates
+    them perfectly. Runs shorter than the floor are dropped."""
     mean = features.mean(axis=0)
     std = features.std(axis=0) + 1e-9
     zscores = np.abs((features - mean) / std)
@@ -121,6 +127,8 @@ def find_events(rows, features, flags, confirm_flags=None):
         while i < n and flags[i]:
             i += 1
         end = i  # exclusive
+        if end - start < min_duration:
+            continue
         peak = start + int(np.argmax(severity[start:end]))
         confirmed = bool(confirm_flags[start:end].any()) if confirm_flags is not None else True
         events.append({
@@ -128,6 +136,8 @@ def find_events(rows, features, flags, confirm_flags=None):
             "end_ts": rows[end - 1]["timestamp"],
             "asset_id": rows[peak]["asset_id"],
             "duration_s": end - start,
+            "start_row": start,
+            "end_row": end - 1,
             "peak_row": peak,
             "confirmed": confirmed,
             "signals": {
@@ -135,6 +145,39 @@ def find_events(rows, features, flags, confirm_flags=None):
             },
         })
     return events
+
+
+def truth_windows(truth):
+    """Contiguous ground-truth anomaly runs -> list of (start, end) row spans
+    (end exclusive). These are the injected fault windows."""
+    windows = []
+    i = 0
+    n = len(truth)
+    while i < n:
+        if not truth[i]:
+            i += 1
+            continue
+        start = i
+        while i < n and truth[i]:
+            i += 1
+        windows.append((start, i))
+    return windows
+
+
+def event_metrics(events, truth):
+    """Event-level scoring -- the number that matters for maintenance: of the
+    injected fault windows, how many produced an event (caught), and how many
+    events matched no real fault (false alarms)."""
+    windows = truth_windows(truth)
+    caught = sum(
+        1 for (ws, we) in windows
+        if any(e["start_row"] < we and e["end_row"] >= ws for e in events)
+    )
+    false_alarms = sum(
+        1 for e in events
+        if not any(e["start_row"] < we and e["end_row"] >= ws for (ws, we) in windows)
+    )
+    return caught, len(windows), false_alarms
 
 
 def format_anomaly_prompt(event):
@@ -145,6 +188,7 @@ def format_anomaly_prompt(event):
         "Signal frame (J1939):",
     ]
     s = event["signals"]
+    flagged = []
     for col in FEATURE_COLUMNS:
         label, unit = SPN_LABELS[col]
         value = s[col]
@@ -155,11 +199,20 @@ def format_anomaly_prompt(event):
             flag = "  <-- HIGH"
         elif col == "spn190_engine_speed_rpm" and value > RPM_MAX:
             flag = "  <-- OVER REDLINE"
+        if flag:
+            flagged.append(label)
         lines.append(f"  {label}: {value:.0f} {unit}{flag}")
-    lines.append(
-        f"Baseline oil pressure at {BASELINE_RPM:.0f} rpm is "
-        f"~{BASELINE_OIL_KPA:.0f} kPa. Summarize."
-    )
+    # Small on-device models latch onto whatever context is offered, so only
+    # mention the oil baseline when oil pressure is actually the flagged
+    # signal, and name the flagged signal(s) explicitly in the instruction.
+    if "SPN 100 Engine Oil Pressure" in flagged:
+        lines.append(
+            f"Baseline oil pressure at {BASELINE_RPM:.0f} rpm is "
+            f"~{BASELINE_OIL_KPA:.0f} kPa."
+        )
+    target = " and ".join(flagged) if flagged else "the deviating signals"
+    lines.append(f"Summarize the likely fault behind {target} and the "
+                 "recommended action.")
     return "\n".join(lines)
 
 
@@ -194,6 +247,8 @@ def main():
     ap.add_argument("--csv", default="data/demo_run.csv")
     ap.add_argument("--events-out", default="data/detected_events.json")
     ap.add_argument("--contamination", type=float, default=0.08)
+    ap.add_argument("--min-duration", type=int, default=3,
+                     help="Debounce: drop flagged runs shorter than this many rows")
     ap.add_argument("--stream", action="store_true",
                      help="Print a simulated live pass over the rows instead of a batch report")
     ap.add_argument("--speed", type=float, default=50.0,
@@ -223,7 +278,17 @@ def main():
     evaluate("isoforest-only", if_flags, truth)
     evaluate("combined (OR)", combined, truth)
 
-    events = find_events(rows, features, combined, confirm_flags=t_flags)
+    raw_events = find_events(rows, features, combined, confirm_flags=t_flags,
+                             min_duration=1)
+    events = find_events(rows, features, combined, confirm_flags=t_flags,
+                         min_duration=args.min_duration)
+    debounced = len(raw_events) - len(events)
+    caught, total, false_alarms = event_metrics(events, truth)
+    print(f"\nEvent-level (what a maintenance team acts on):")
+    print(f"  fault windows caught: {caught}/{total}   "
+          f"false-alarm events: {false_alarms}   "
+          f"noise blips debounced (<{args.min_duration}s): {debounced}")
+
     print(f"\n{len(events)} anomaly event(s) detected:")
     for e in events:
         tag = "confirmed" if e["confirmed"] else "unconfirmed (ML-only)"

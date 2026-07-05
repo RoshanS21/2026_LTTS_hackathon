@@ -1,93 +1,82 @@
 [
   {
-    "start_ts": "2026-07-03T15:48:02+00:00",
-    "end_ts": "2026-07-03T15:48:02+00:00",
+    "start_ts": "2026-07-05T15:04:51+00:00",
+    "end_ts": "2026-07-05T15:05:21+00:00",
     "asset_id": "DEERE-7R-014",
-    "duration_s": 1,
-    "peak_row": 226,
+    "duration_s": 31,
+    "start_row": 266,
+    "end_row": 296,
+    "peak_row": 296,
+    "confirmed": true,
     "signals": {
-      "spn190_engine_speed_rpm": 2175.8,
-      "spn110_coolant_temp_c": 95.4,
-      "spn100_oil_pressure_kpa": 410.6,
-      "spn175_oil_temp_c": 101.5
+      "spn190_engine_speed_rpm": 2146.1,
+      "spn110_coolant_temp_c": 93.9,
+      "spn100_oil_pressure_kpa": 51.8,
+      "spn175_oil_temp_c": 125.5
     }
   },
   {
-    "start_ts": "2026-07-03T15:48:04+00:00",
-    "end_ts": "2026-07-03T15:49:03+00:00",
-    "asset_id": "DEERE-7R-014",
-    "duration_s": 60,
-    "peak_row": 287,
-    "signals": {
-      "spn190_engine_speed_rpm": 2140.8,
-      "spn110_coolant_temp_c": 94.4,
-      "spn100_oil_pressure_kpa": 35.7,
-      "spn175_oil_temp_c": 125.2
-    }
-  },
-  {
-    "start_ts": "2026-07-03T15:52:37+00:00",
-    "end_ts": "2026-07-03T15:53:13+00:00",
-    "asset_id": "DEERE-7R-014",
-    "duration_s": 37,
-    "peak_row": 536,
-    "signals": {
-      "spn190_engine_speed_rpm": 2098.4,
-      "spn110_coolant_temp_c": 95.3,
-      "spn100_oil_pressure_kpa": 38.8,
-      "spn175_oil_temp_c": 123.9
-    }
-  },
-  {
-    "start_ts": "2026-07-03T15:58:40+00:00",
-    "end_ts": "2026-07-03T15:59:36+00:00",
-    "asset_id": "DEERE-7R-014",
-    "duration_s": 57,
-    "peak_row": 920,
-    "signals": {
-      "spn190_engine_speed_rpm": 2058.4,
-      "spn110_coolant_temp_c": 89.7,
-      "spn100_oil_pressure_kpa": 27.6,
-      "spn175_oil_temp_c": 119.4
-    }
-  },
-  {
-    "start_ts": "2026-07-03T16:07:21+00:00",
-    "end_ts": "2026-07-03T16:07:46+00:00",
-    "asset_id": "DEERE-7R-014",
-    "duration_s": 26,
-    "peak_row": 1410,
-    "signals": {
-      "spn190_engine_speed_rpm": 2133.7,
-      "spn110_coolant_temp_c": 90.4,
-      "spn100_oil_pressure_kpa": 34.6,
-      "spn175_oil_temp_c": 122.5
-    }
-  },
-  {
-    "start_ts": "2026-07-03T16:07:52+00:00",
-    "end_ts": "2026-07-03T16:07:52+00:00",
-    "asset_id": "DEERE-7R-014",
-    "duration_s": 1,
-    "peak_row": 1416,
-    "signals": {
-      "spn190_engine_speed_rpm": 2173.4,
-      "spn110_coolant_temp_c": 89.3,
-      "spn100_oil_pressure_kpa": 402.9,
-      "spn175_oil_temp_c": 96.2
-    }
-  },
-  {
-    "start_ts": "2026-07-03T16:09:34+00:00",
-    "end_ts": "2026-07-03T16:09:54+00:00",
+    "start_ts": "2026-07-05T15:08:14+00:00",
+    "end_ts": "2026-07-05T15:08:34+00:00",
     "asset_id": "DEERE-7R-014",
     "duration_s": 21,
-    "peak_row": 1538,
+    "start_row": 469,
+    "end_row": 489,
+    "peak_row": 488,
+    "confirmed": true,
     "signals": {
-      "spn190_engine_speed_rpm": 2116.9,
-      "spn110_coolant_temp_c": 90.7,
-      "spn100_oil_pressure_kpa": 25.5,
-      "spn175_oil_temp_c": 122.7
+      "spn190_engine_speed_rpm": 2650.6,
+      "spn110_coolant_temp_c": 94.0,
+      "spn100_oil_pressure_kpa": 445.4,
+      "spn175_oil_temp_c": 97.7
+    }
+  },
+  {
+    "start_ts": "2026-07-05T15:10:29+00:00",
+    "end_ts": "2026-07-05T15:10:55+00:00",
+    "asset_id": "DEERE-7R-014",
+    "duration_s": 27,
+    "start_row": 604,
+    "end_row": 630,
+    "peak_row": 630,
+    "confirmed": true,
+    "signals": {
+      "spn190_engine_speed_rpm": 2091.5,
+      "spn110_coolant_temp_c": 121.3,
+      "spn100_oil_pressure_kpa": 321.8,
+      "spn175_oil_temp_c": 112.6
+    }
+  },
+  {
+    "start_ts": "2026-07-05T15:18:33+00:00",
+    "end_ts": "2026-07-05T15:18:56+00:00",
+    "asset_id": "DEERE-7R-014",
+    "duration_s": 24,
+    "start_row": 1088,
+    "end_row": 1111,
+    "peak_row": 1111,
+    "confirmed": true,
+    "signals": {
+      "spn190_engine_speed_rpm": 2068.4,
+      "spn110_coolant_temp_c": 88.3,
+      "spn100_oil_pressure_kpa": 54.6,
+      "spn175_oil_temp_c": 121.0
+    }
+  },
+  {
+    "start_ts": "2026-07-05T15:22:50+00:00",
+    "end_ts": "2026-07-05T15:23:10+00:00",
+    "asset_id": "DEERE-7R-014",
+    "duration_s": 21,
+    "start_row": 1345,
+    "end_row": 1365,
+    "peak_row": 1365,
+    "confirmed": true,
+    "signals": {
+      "spn190_engine_speed_rpm": 2178.9,
+      "spn110_coolant_temp_c": 119.3,
+      "spn100_oil_pressure_kpa": 403.7,
+      "spn175_oil_temp_c": 112.4
     }
   }
 ]
