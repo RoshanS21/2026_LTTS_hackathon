@@ -1,17 +1,32 @@
 # Edge-AI Predictive Maintenance — LTTS "Engineering Intelligence" Hackathon
 
 An edge-AI predictive maintenance demo for fleet/equipment telematics. A
-Raspberry Pi 5 acts as an "edge ECU": it streams J1939 sensor signals, runs
+Raspberry Pi 5 acts as an "edge ECU": it streams sensor signals, runs
 anomaly detection on-device row-by-row, produces a 2-sentence natural-language
 maintenance summary via a small local LLM when a fault fires, and closes a
-full perceive → decide → act loop by driving a GPIO alarm (LED/buzzer/relay)
-autonomously on confirmed faults. Everything is shown on a live-updating web
-dashboard.
+full perceive → decide → act loop by driving a physical actuator autonomously
+on confirmed faults. Everything is shown on a live-updating web dashboard.
 
 Pitch: compute on the edge, ship only high-value AI-summarized insights
 instead of raw telemetry — bandwidth/cloud-cost reduction, with the
 detection step itself never depending on a network connection or an LLM
 being available.
+
+## Two demo paths: live hardware + a recorded-backup software path
+
+We're mid-pivot from a fully simulated pipeline to real physical hardware
+(three devices: a Circuit Playground Express sensor edge, the Pi running
+detection + LLM + dashboard, an ESP32-C6 driving a servo). **This is the
+live, on-stage story.** Pieces are being built in order — see
+`firmware/README.md` for what's done.
+
+The original all-software pipeline (`j1939_generator.py` → synthetic J1939
+CSVs → `anomaly_detector.py` → `llm_summary.py` → `dashboard.py` →
+`edge_actuator.py` driving a GPIO alarm) is fully built, measured, and still
+committed below. Per this project's own "recorded-backup mindset" (see
+below), it now serves double duty as **the fallback demo path** if the live
+hardware chain hits a hiccup on stage — everything in the rest of this
+README still runs exactly as documented.
 
 ## Measured results (this Pi 5, reproducible from the defaults)
 
@@ -76,7 +91,23 @@ All four are committed under `data/`; regenerate any time with
   diagnosis, and if the LLM is slow/unreachable, a deterministic templated
   summary takes over — the demo has no silent failure mode.
 
-## Pipeline
+## Live hardware pipeline (in progress)
+
+Three physical devices: a Circuit Playground Express (CPX) sensor edge, the
+Raspberry Pi 5 (detection + LLM + dashboard), and an ESP32-C6 actuator ECU
+driving a servo (optionally reading a 5V Wiegand badge reader for
+identity/audit — strictly optional, never gates the core loop).
+
+| # | File | What it does |
+|---|------|---------------|
+| 1a | `firmware/cpx_sensor.py` | CircuitPython firmware for the CPX: streams onboard accelerometer/temperature/mic-loudness as clean CSV lines over USB serial at 10Hz. A fault is physically inducible — shake the board (accel spike) or warm it (temp rise). Button A is a transparent manual-trigger flag for demo safety, reported as-is, never blended into sensor values. See `firmware/README.md` for install + on-stage notes. |
+| 1b | `cpx_serial_reader.py` | Pi-side reader: auto-detects the CPX by USB VID, parses its serial CSV into frame dicts (assigns the wall-clock timestamp the CPX itself can't), skips malformed lines with a warning instead of crashing, and appends every live run to a CSV for the recorded-backup pile. `--mock` generates synthetic frames (with an optional injected shake burst) so downstream pieces can be built/tested without hardware attached. |
+| 2 | *(next)* | Anomaly detection adapted to consume live CPX frames instead of J1939 CSV rows. |
+| 3 | *(next)* | LLM summary layer — reuse `llm_summary.py`'s prompt/fallback pattern against the new signal set. |
+| 4 | *(next)* | ESP32-C6 servo firmware (+ optional Wiegand reader, level-shifted). |
+| 5 | *(next)* | Flask dashboard adapted for the live serial-fed pipeline. |
+
+## Software pipeline (recorded-backup path)
 
 | # | File | What it does |
 |---|------|---------------|
@@ -113,15 +144,21 @@ All four are committed under `data/`; regenerate any time with
 ollama pull qwen2.5:1.5b
 
 # System packages (prebuilt arm64 wheels via apt — much faster than pip build-from-source on a Pi)
-sudo apt install -y python3-sklearn python3-flask python3-numpy python3-gpiozero
+sudo apt install -y python3-sklearn python3-flask python3-numpy python3-gpiozero python3-serial
 
 # Optional hardware: LED (or buzzer/relay module) on GPIO17 + GND.
 # Without it everything still runs — the actuator logs its decisions instead.
+
+# CPX: flash firmware/cpx_sensor.py per firmware/README.md, then plug into the Pi over USB.
 ```
 
 ## Usage
 
 ```bash
+# 0. CPX live sensor stream (auto-detects the board's serial port)
+python3 cpx_serial_reader.py
+python3 cpx_serial_reader.py --mock --fault-at 5 --fault-duration 4   # no hardware -- synthetic test
+
 # 1. Decide Option A vs B on this hardware
 python3 benchmark_edge_llm.py
 

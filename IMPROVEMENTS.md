@@ -1,5 +1,23 @@
 # Improvement ideas
 
+## Done (2026-07-10)
+
+- **Pivoted from the all-software J1939 pipeline to real hardware.** Decided
+  with Roshan: keep the existing simulated pipeline as the recorded-backup
+  demo path (README now says so explicitly), build a live 3-device chain
+  (CPX sensor edge -> Pi detection+LLM+dashboard -> ESP32-C6 servo actuator)
+  as the on-stage story.
+- Piece 1 built: `firmware/cpx_sensor.py` (CPX CircuitPython firmware --
+  accel/temp/mic-loudness over USB serial at 10Hz, button A as an honest
+  manual-trigger flag, never blended into sensor values) +
+  `cpx_serial_reader.py` (Pi-side reader: USB-VID auto-detect, malformed-line
+  skip-with-warning, `--mock` mode for hardware-free testing). Self-tested
+  via `--mock --fault-at` -- parser, CSV writer, and synthetic shake-burst
+  injection all verified working without physical hardware attached.
+- Not yet tested on the real CPX/Pi (no hardware in this environment) --
+  first thing to verify once hardware is available: `firmware/README.md`'s
+  install steps, then `python3 cpx_serial_reader.py` against the real board.
+
 ## Done (2026-07-05)
 
 1. ~~Close the Agentic AI gap with real physical actuation~~ — `edge_actuator.py`:
@@ -49,6 +67,23 @@ auto-opened, feed ran) — before the next GPIO demo, kill any old
 backend ('GPIO busy').
 
 ## Remaining
+
+### Hardware pipeline (current priority)
+2. Adapt `anomaly_detector.py` (or a new sibling module) to consume live
+   CPX frames (accel_x/y/z, accel_mag, temp_c, sound_level) instead of
+   J1939 CSV rows. Threshold tier is straightforward; CUSUM drift tier
+   should transfer almost directly (still a baseline + accumulator per
+   signal); IsolationForest needs refit on CPX-shaped feature vectors.
+3. Reuse `llm_summary.py`'s prompt-building + fallback-template pattern
+   against the new event shape.
+4. ESP32-C6 servo firmware, + optional Wiegand reader (5V, needs the
+   BSS138 level shifter — see project brief for wiring notes).
+5. Adapt `dashboard.py` to read from the live `cpx_serial_reader.py`
+   stream instead of CSV replay.
+6. First real-hardware validation pass (nothing above has touched actual
+   hardware yet): flash the CPX, confirm `cpx_serial_reader.py` against
+   the real board's serial port, physically induce a shake and a warm
+   fault and confirm both show up as clean frames.
 
 ### Demo script for the pitch (optional polish)
 Suggested 90-second arc, all verified working:
