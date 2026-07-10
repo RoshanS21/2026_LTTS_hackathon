@@ -80,6 +80,7 @@ STATE = {
     "stats": {},
     "actions": [],
     "alarm_active": False,
+    "display_offset": 0,   # events before this index are hidden (Clear button)
     "version": 0,
 }
 STATE_LOCK = threading.Lock()
@@ -261,10 +262,13 @@ def run_pipeline(args, actuator):
             slot = s["events"][idx]
             slot["event"] = event
             slot["breaches"] = signal_breaches(event["signals"])
-            if confirmed:
-                s["stats"]["confirmed_events"] += 1
-            else:
-                s["stats"]["monitor_events"] += 1
+            # Don't count an event that Clear has already hidden (it was in
+            # progress when the feed was cleared), so the tile matches the feed.
+            if idx >= s["display_offset"]:
+                if confirmed:
+                    s["stats"]["confirmed_events"] += 1
+                else:
+                    s["stats"]["monitor_events"] += 1
         _mutate(apply)
         worker.submit(idx, event)
         actuator.alarm_off()
@@ -388,6 +392,11 @@ PAGE = """
   h1 { font-size: 1.2rem; margin: 0 0 2px; }
   h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em;
        color: #64748b; margin: 20px 0 8px; }
+  #clearBtn { float: right; text-transform: none; letter-spacing: normal;
+              font-size: 0.72rem; font-weight: 600; color: #cbd5e1;
+              background: #334155; border: none; border-radius: 6px;
+              padding: 3px 10px; cursor: pointer; }
+  #clearBtn:hover { background: #475569; }
   #sub { color: #94a3b8; font-size: 0.85rem; margin-bottom: 12px; }
   #status { display: inline-block; padding: 3px 10px; border-radius: 999px;
             font-size: 0.75rem; font-weight: 600; }
@@ -443,7 +452,8 @@ PAGE = """
   <h2>Live sensor (on-device detection, per frame)</h2>
   <div class="sigs" id="sigs"></div>
 
-  <h2>Detected events &rarr; edge-LLM summaries</h2>
+  <h2>Detected events &rarr; edge-LLM summaries
+      <button id="clearBtn" onclick="clearFeed()">clear feed</button></h2>
   <div id="events"><div id="empty">waiting for the sensor stream...</div></div>
 
   <h2>Perceive &rarr; decide &rarr; act (actuator log)</h2>
@@ -586,6 +596,10 @@ function render(d) {
   renderTiles(d); renderSigs(d); renderEvents(d); renderActions(d);
 }
 
+async function clearFeed() {
+  try { await fetch('/api/clear', {method: 'POST'}); lastVersion = -1; } catch (e) {}
+}
+
 async function poll() {
   try {
     const res = await fetch('/api/state');
@@ -609,14 +623,35 @@ def index():
 @app.route("/api/state")
 def api_state():
     with STATE_LOCK:
-        return jsonify(STATE)
+        # The pipeline thread indexes events by absolute position, so we never
+        # mutate the list on Clear -- we just hide everything before the offset.
+        resp = dict(STATE)
+        resp["events"] = STATE["events"][STATE["display_offset"]:]
+    return jsonify(resp)
+
+
+@app.route("/api/clear", methods=["POST"])
+def api_clear():
+    """Clear the visible event feed (the summaries) without disturbing the live
+    stream: hide current events and reset the visible event counters. The
+    bandwidth ledger and LLM-latency stats stay cumulative for the session."""
+    def clr(s):
+        s["display_offset"] = len(s["events"])
+        s["stats"]["confirmed_events"] = 0
+        s["stats"]["monitor_events"] = 0
+        s["stats"]["debounced"] = 0
+    _mutate(clr)
+    return jsonify({"ok": True})
 
 
 def main():
     ap = argparse.ArgumentParser(description="Live CPX hardware dashboard for the LTTS edge-AI demo.")
     ap.add_argument("--host", default=DEFAULT_HOST)
     ap.add_argument("--model", default=DEFAULT_MODEL)
-    ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    ap.add_argument("--timeout", type=float, default=25.0,
+                    help="Edge-LLM timeout. Higher than the J1939 default because a "
+                         "sustained fault queues several summaries under CPU contention; "
+                         "more headroom means a real AI diagnosis instead of the template.")
     ap.add_argument("--contamination", type=float, default=0.05,
                     help="IsolationForest outlier fraction; lower = fewer monitor events")
     ap.add_argument("--cusum-h", type=float, default=12.0,
