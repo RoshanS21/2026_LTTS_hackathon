@@ -13,8 +13,9 @@ results"), and we mark clearly what is *built & verified* vs. *on the roadmap*
 |---|---|
 | Simulated J1939 pipeline (generator → 3-tier detection → edge LLM → dashboard → GPIO actuator) | **Built & verified end-to-end on the Pi 5** — also the recorded-backup demo path |
 | CPX sensor edge (firmware + Pi-side serial reader) | **Built & verified on real hardware** (447-frame live capture, CircuitPython 10.2.1) |
-| CPX-path detection profile (`cpx_detector.py`, shares the J1939 detection core) | Built |
-| Live serial-fed dashboard + ESP32-C6 servo actuator + first full-chain hardware pass | **Roadmap** (`IMPROVEMENTS.md` → "Remaining") |
+| CPX-path detection + edge-LLM summaries (`cpx_detector.py` / profile-aware `llm_summary.py`, share the J1939 core) | **Built & verified on real hardware** |
+| Live serial-fed dashboard (`cpx_dashboard.py`): sensor → detect → LLM → actuate, streaming | **Built & verified end-to-end on live CPX** (shake/warm/Button A → confirmed event → on-Pi AI diagnosis → actuator) |
+| ESP32-C6 servo actuator (firmware + Pi client) | Built & mock-verified; **GPIO alarm is the live physical actuator** (the demo C6 board failed hardware bring-up — a spare flashes in minutes) |
 | RUL projection, on-device service-manual RAG | **Roadmap differentiators** |
 
 ---
@@ -48,9 +49,9 @@ fully-built software fallback path:
 ```
  Sensor edge            Compute edge (Raspberry Pi 5 = "edge ECU")            Actuator ECU
  ┌───────────┐   USB    ┌──────────────────────────────────────────────┐  GPIO/  ┌────────────┐
- │ CPX board │ ───────▶ │ perceive → DETECT (3-tier) → DIAGNOSE (LLM)   │ ──────▶ │ ESP32-C6   │
- │ accel/    │  serial  │        → DECIDE (policy) → live DASHBOARD      │ serial  │ servo /    │
- │ temp/mic  │  10 Hz   │                                                │         │ GPIO alarm │
+ │ CPX board │ ───────▶ │ perceive → DETECT (3-tier) → DIAGNOSE (LLM)  │ ──────▶ │ ESP32-C6   │
+ │ accel/    │  serial  │        → DECIDE (policy) → live DASHBOARD    │ serial  │ servo /    │
+ │ temp/mic  │  10 Hz   │                                              │         │ GPIO alarm │
  └───────────┘          └──────────────────────────────────────────────┘         └────────────┘
                                    ships only insight ▲  (~3 KB) not raw telemetry (~121 KB)
 ```
@@ -64,10 +65,14 @@ fully-built software fallback path:
 - **Diagnose:** `llm_summary.py` — a small local LLM (`qwen2.5:1.5b` via
   Ollama) writes a 2-sentence maintenance summary, with a deterministic
   templated fallback.
-- **Decide → Act:** `edge_actuator.py` — a pure `decide()` policy drives a
-  physical actuator (GPIO alarm today; ESP32-C6 servo on the roadmap).
-- **Display:** `dashboard.py` — a single Flask page runs the whole loop live,
-  streaming events, sparklines, run stats, the bandwidth ledger, and the
+- **Decide → Act:** a pure `decide()` policy (`edge_actuator.py`) drives a
+  physical actuator through a shared interface: the GPIO alarm (live) or the
+  ESP32-C6 servo over serial (`esp32_actuator.py`, mock-verified). Either
+  degrades to a log-only mock, so the decision log stays real even with no
+  actuator wired.
+- **Display:** `dashboard.py` (simulated J1939) and `cpx_dashboard.py` (live
+  CPX serial) — a single Flask page runs the whole loop live, streaming
+  events, sparklines, run stats, the bandwidth ledger, and the
   perceive→decide→act log.
 
 **Key architectural choice:** detection is the source of truth and runs with
