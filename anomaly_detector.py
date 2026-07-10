@@ -146,10 +146,15 @@ def evaluate(name, flags, truth):
 
 
 def find_events(rows, features, flags, confirm_flags=None, min_duration=3,
-                min_unconfirmed=8, merge_gap=3):
+                min_unconfirmed=8, merge_gap=3, feature_columns=None):
     """Flagged runs -> one event each, snapshotted at the row with the
     largest overall deviation from the dataset baseline (type-agnostic --
     a real detector doesn't know the injected label).
+
+    `feature_columns` names the CSV columns snapshotted into each event's
+    "signals" dict; defaults to the J1939 FEATURE_COLUMNS so existing
+    callers are unaffected, but the CPX profile (cpx_detector.py) passes its
+    own accel/temp/sound columns through the same generic machinery.
 
     `confirm_flags` (typically the deterministic threshold flags) marks an
     event "confirmed" if any row in its window also breached a hard safety
@@ -170,6 +175,8 @@ def find_events(rows, features, flags, confirm_flags=None, min_duration=3,
         pure-ML claim needs sustained support; on this data real drifts
         sustain 100+ flagged rows while noise chains muster a handful, so
         an 8-row floor separates them (validated across all scenarios)."""
+    if feature_columns is None:
+        feature_columns = FEATURE_COLUMNS
     mean = features.mean(axis=0)
     std = features.std(axis=0) + 1e-9
     zscores = np.abs((features - mean) / std)
@@ -218,7 +225,7 @@ def find_events(rows, features, flags, confirm_flags=None, min_duration=3,
             "confirmed": confirmed,
             "confirm_lead_s": lead,
             "signals": {
-                col: float(rows[peak][col]) for col in FEATURE_COLUMNS
+                col: float(rows[peak][col]) for col in feature_columns
             },
         })
     return events
