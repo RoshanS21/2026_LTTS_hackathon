@@ -44,7 +44,7 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
-DEFAULT_ASSET_ID = "DEERE-7R-014"
+DEFAULT_ASSET_ID = "VEHICLE"
 
 # Baseline operating point -- matches the "2100 rpm / ~340 kPa" anomaly prompt
 # in benchmark_edge_llm.py so downstream pieces describe the same normal state.

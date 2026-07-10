@@ -7,7 +7,7 @@
     "event": {
       "start_ts": "2026-07-05T19:18:02+00:00",
       "end_ts": "2026-07-05T19:18:29+00:00",
-      "asset_id": "DEERE-7R-014",
+      "asset_id": "VEHICLE",
       "duration_s": 28,
       "start_row": 271,
       "end_row": 298,
@@ -30,7 +30,7 @@
     "event": {
       "start_ts": "2026-07-05T19:21:17+00:00",
       "end_ts": "2026-07-05T19:21:42+00:00",
-      "asset_id": "DEERE-7R-014",
+      "asset_id": "VEHICLE",
       "duration_s": 26,
       "start_row": 466,
       "end_row": 491,
@@ -53,7 +53,7 @@
     "event": {
       "start_ts": "2026-07-05T19:31:45+00:00",
       "end_ts": "2026-07-05T19:32:03+00:00",
-      "asset_id": "DEERE-7R-014",
+      "asset_id": "VEHICLE",
       "duration_s": 19,
       "start_row": 1094,
       "end_row": 1112,
@@ -76,7 +76,7 @@
     "event": {
       "start_ts": "2026-07-05T19:36:27+00:00",
       "end_ts": "2026-07-05T19:36:49+00:00",
-      "asset_id": "DEERE-7R-014",
+      "asset_id": "VEHICLE",
       "duration_s": 23,
       "start_row": 1376,
       "end_row": 1398,
@@ -99,7 +99,7 @@
     "event": {
       "start_ts": "2026-07-05T19:38:56+00:00",
       "end_ts": "2026-07-05T19:39:29+00:00",
-      "asset_id": "DEERE-7R-014",
+      "asset_id": "VEHICLE",
       "duration_s": 34,
       "start_row": 1525,
       "end_row": 1558,

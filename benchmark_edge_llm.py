@@ -70,7 +70,7 @@ SYSTEM_PROMPT = (
 )
 
 USER_PROMPT = (
-    "Anomaly flagged on asset DEERE-7R-014.\n"
+    "Anomaly flagged on asset VEHICLE.\n"
     "Signal frame (J1939):\n"
     "  SPN 190 Engine Speed: 2100 rpm\n"
     "  SPN 110 Engine Coolant Temp: 104 C\n"
