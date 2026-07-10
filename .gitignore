@@ -6,5 +6,10 @@ venv/
 .DS_Store
 *.log
 
-# real hardware captures -- only honest to commit an actual run, not a stand-in
+# real hardware captures -- only honest to commit an actual run, not a stand-in.
+# cpx_summaries.json / cpx_events.json are derived from a (gitignored) real
+# capture and are LLM-nondeterministic, so they can't be reproducible
+# committed snapshots either.
 data/cpx_live_run.csv
+data/cpx_summaries.json
+data/cpx_events.json

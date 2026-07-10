@@ -159,6 +159,55 @@ def infer_trigger(event):
     return "unknown"
 
 
+# Deterministic templated fallbacks for the summary layer (llm_summary.py),
+# keyed by infer_trigger()'s labels. Same role as llm_summary's J1939
+# FALLBACK_TEMPLATES: an honest, if blunter, 2-sentence summary (likely fault
+# + recommended action) when the LLM is unreachable or too slow. The manual
+# template never invents a sensor fault -- it describes an operator-requested
+# inspection, matching this piece's button-trigger honesty convention.
+FALLBACK_TEMPLATES = {
+    "vibration": (
+        "Vibration magnitude of {accel_mag_ms2:.1f} m/s^2 deviates sharply "
+        "from the ~9.8 m/s^2 gravity baseline, consistent with unbalanced or "
+        "worn rotating machinery (bearing wear, imbalance, or a loose mount). "
+        "Recommend inspecting the drivetrain, bearings, and mounts before "
+        "continued operation."
+    ),
+    "overheat": (
+        "Asset temperature of {temp_c:.1f} C exceeds the safe operating limit, "
+        "consistent with overheating from cooling loss, sustained overload, or "
+        "high ambient heat. Recommend reducing load and checking the cooling "
+        "path before resuming operation."
+    ),
+    "loud_acoustic": (
+        "Acoustic level of {sound_level:.0f} (mic RMS) has spiked well above "
+        "the quiet baseline, consistent with mechanical impact, cavitation, or "
+        "a component beginning to fail. Recommend an acoustic and physical "
+        "inspection of the asset."
+    ),
+    "manual": (
+        "Operator pressed the manual inspection trigger on {asset_id}; the "
+        "vibration, temperature, and acoustic signals are within normal "
+        "bounds. Recommend a manual inspection to confirm asset condition, as "
+        "no automatic fault was detected."
+    ),
+    "unknown": (
+        "Sensor readings on {asset_id} deviate from baseline (vibration="
+        "{accel_mag_ms2:.1f} m/s^2, temp={temp_c:.1f} C, sound={sound_level:.0f}). "
+        "Recommend a manual inspection to confirm the root cause."
+    ),
+}
+
+
+def fallback_summary(event):
+    """(text, trigger) deterministic summary for an event -- the profile hook
+    llm_summary.py calls when the LLM path is unavailable."""
+    trigger = infer_trigger(event)
+    fields = dict(event["signals"])
+    fields["asset_id"] = event["asset_id"]
+    return FALLBACK_TEMPLATES[trigger].format(**fields), trigger
+
+
 def format_anomaly_prompt(event):
     """CPX-shaped anomaly prompt for the LLM summary layer -- same structure
     as anomaly_detector.format_anomaly_prompt but for machine-health signals

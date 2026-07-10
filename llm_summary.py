@@ -13,11 +13,18 @@ natural-language gloss on top of it. If it's slow or down, the fallback
 template still gives a correct, if blunter, maintenance summary -- the demo
 never has a "silent" failure mode.
 
+Works for both signal domains via --profile: the simulated J1939 pipeline
+(default) and the live CPX hardware pipeline, which supplies its own prompt
+and fallback templates from cpx_detector.py. The LLM call, timeout budget,
+warm-up, and fallback dispatch are shared, so the two paths can't drift.
+
 USAGE
 -----
   python3 llm_summary.py                              # detect + summarize data/demo_run.csv
   python3 llm_summary.py --events-in data/detected_events.json
   python3 llm_summary.py --model gemma2:2b --timeout 8
+  python3 llm_summary.py --profile cpx                # summarize CPX live-capture events
+  python3 llm_summary.py --profile cpx --csv data/cpx_live_run.csv
 """
 
 import argparse
@@ -129,14 +136,23 @@ def warm_up(host, model):
         return False
 
 
-def summarize_event(host, model, event, timeout):
+def summarize_event(host, model, event, timeout, profile=None):
+    """Summarize one event. `profile` (an object exposing
+    format_anomaly_prompt + fallback_summary) selects the signal domain;
+    None keeps the default J1939 behaviour so existing callers (dashboard.py)
+    are unaffected. cpx_detector.py is passed as the profile for the live
+    hardware path."""
+    prompt_fn = profile.format_anomaly_prompt if profile else format_anomaly_prompt
+    fallback_fn = profile.fallback_summary if profile else fallback_summary
+
     if not event.get("confirmed", True):
-        # ML-only flag, no hard threshold breached anywhere in the window --
-        # don't let the LLM improvise a confident diagnosis for likely noise.
-        text = MONITOR_NOTE.format(asset_id=event["asset_id"], **event["signals"])
+        # Statistical-only flag, no hard threshold breached anywhere in the
+        # window -- don't let the LLM improvise a confident diagnosis for
+        # likely noise. (Profile-agnostic: only asset_id is interpolated.)
+        text = MONITOR_NOTE.format(asset_id=event["asset_id"])
         return {"source": "monitor", "model": None, "text": text, "latency_s": 0.0}
 
-    prompt = format_anomaly_prompt(event)
+    prompt = prompt_fn(event)
     t0 = time.monotonic()
     try:
         resp = call_llm(host, model, prompt, timeout)
@@ -147,7 +163,7 @@ def summarize_event(host, model, event, timeout):
         return {"source": "llm", "model": model, "text": text, "latency_s": elapsed}
     except Exception as e:  # noqa: BLE001
         elapsed = time.monotonic() - t0
-        text, trigger = fallback_summary(event)
+        text, trigger = fallback_fn(event)
         print(f"    LLM call failed/too slow after {elapsed:.1f}s ({e}) "
               f"-- using '{trigger}' fallback template", file=sys.stderr)
         return {"source": "fallback", "model": None, "text": text, "latency_s": elapsed}
@@ -163,43 +179,74 @@ def detect_events(csv_path):
     return find_events(rows, features, combined, confirm_flags=t_flags)
 
 
+def cpx_profile():
+    """Build the CPX summary profile (prompt + fallback + detector) lazily,
+    so the default J1939 path and dashboard.py never import cpx_detector."""
+    import cpx_detector
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        format_anomaly_prompt=cpx_detector.format_anomaly_prompt,
+        fallback_summary=cpx_detector.fallback_summary,
+        detect_events=lambda csv: cpx_detector.detect(load_csv(csv))[0],
+        default_csv="data/cpx_live_run.csv",
+        default_out="data/cpx_summaries.json",
+    )
+
+
 def main():
     ap = argparse.ArgumentParser(
-        description="Summarize detected J1939 anomaly events via a local LLM, with templated fallback."
+        description="Summarize detected anomaly events via a local LLM, with "
+                    "templated fallback. --profile cpx summarizes CPX live-hardware "
+                    "events; default is the simulated J1939 path."
     )
-    ap.add_argument("--csv", default="data/demo_run.csv")
+    ap.add_argument("--profile", choices=["j1939", "cpx"], default="j1939",
+                     help="Signal domain: j1939 (simulated) or cpx (live hardware)")
+    ap.add_argument("--csv", default=None,
+                     help="Input CSV (default: profile's canonical dataset)")
     ap.add_argument("--events-in", default=None,
                      help="Read pre-computed events from this JSON instead of re-running detection")
     ap.add_argument("--host", default=DEFAULT_HOST)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
-    ap.add_argument("--out", default="data/summaries.json")
+    ap.add_argument("--out", default=None,
+                     help="Output JSON (default: profile's canonical path)")
     ap.add_argument("--no-warmup", action="store_true")
     args = ap.parse_args()
+
+    if args.profile == "cpx":
+        profile = cpx_profile()
+        detect = profile.detect_events
+    else:
+        profile = None
+        detect = detect_events
+    csv_path = args.csv or (profile.default_csv if profile else "data/demo_run.csv")
+    out_path = args.out or (profile.default_out if profile else "data/summaries.json")
 
     if args.events_in:
         with open(args.events_in) as f:
             events = json.load(f)
     else:
-        events = detect_events(args.csv)
+        events = detect(csv_path)
 
     if not events:
         print("No anomaly events to summarize.")
         return
 
-    print(f"{len(events)} event(s) to summarize (model={args.model}, timeout={args.timeout}s)")
+    print(f"{len(events)} event(s) to summarize "
+          f"(profile={args.profile}, model={args.model}, timeout={args.timeout}s)")
     if not args.no_warmup:
         warm_up(args.host, args.model)
 
     results = []
     for i, event in enumerate(events):
         print(f"\n[{i + 1}/{len(events)}] {event['start_ts']} asset={event['asset_id']}")
-        result = summarize_event(args.host, args.model, event, args.timeout)
+        result = summarize_event(args.host, args.model, event, args.timeout, profile)
         result["event"] = event
         results.append(result)
         print(f"  ({result['source']}, {result['latency_s']:.2f}s): {result['text']}")
 
-    with open(args.out, "w") as f:
+    with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
 
     counts = {}
@@ -207,7 +254,7 @@ def main():
         counts[r["source"]] = counts.get(r["source"], 0) + 1
     breakdown = ", ".join(f"{v} via {k}" for k, v in counts.items())
     print(f"\n{len(results)} event(s) summarized: {breakdown}.")
-    print(f"Wrote {args.out}")
+    print(f"Wrote {out_path}")
 
 
 if __name__ == "__main__":
