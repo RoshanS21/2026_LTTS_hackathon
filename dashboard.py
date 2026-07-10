@@ -377,6 +377,8 @@ PAGE = """
            font-size: 0.75rem; font-weight: 700; background: #dc2626;
            color: white; margin-left: 8px; animation: pulse 0.8s infinite; }
   @keyframes pulse { 50% { opacity: 0.45; } }
+  @keyframes flashBg { 50% { background: #7f1d1d; } }
+  body.flash-alert { animation: flashBg 0.5s 6; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
            gap: 10px; }
   .tile { background: #1e293b; border-radius: 10px; padding: 10px 14px; }
@@ -429,6 +431,36 @@ PAGE = """
 
 <script>
 let lastVersion = -1;
+let prevAlarmActive = false;
+let audioCtx = null;
+function unlockAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  }
+}
+document.addEventListener('touchstart', unlockAudio, {once: true});
+document.addEventListener('click', unlockAudio, {once: true});
+
+// Fault notification for a phone with this page open: vibrate + beep + flash.
+// Fires once per alarm-active edge (armed -> ALARM), never on unconfirmed
+// monitor events.
+function fireFaultAlert() {
+  if (navigator.vibrate) navigator.vibrate([300, 100, 300, 100, 300]);
+  try {
+    unlockAudio();
+    if (audioCtx) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start(); osc.stop(audioCtx.currentTime + 0.6);
+    }
+  } catch (e) {}
+  document.body.classList.add('flash-alert');
+  setTimeout(() => document.body.classList.remove('flash-alert'), 3000);
+}
+
 const STATUS_COLORS = {starting:'#475569', warming:'#7c3aed', streaming:'#2563eb',
                         done:'#16a34a', error:'#dc2626'};
 const SIG_LABELS = {
@@ -572,6 +604,8 @@ function render(d) {
   statusEl.textContent = d.status;
   statusEl.style.background = STATUS_COLORS[d.status] || '#475569';
   document.getElementById('alarm').style.display = d.alarm_active ? 'inline-block' : 'none';
+  if (d.alarm_active && !prevAlarmActive) fireFaultAlert();
+  prevAlarmActive = d.alarm_active;
   renderTiles(d);
   renderSigs(d);
   renderEvents(d);

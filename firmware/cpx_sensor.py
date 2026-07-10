@@ -36,6 +36,15 @@
 # clock -- the CPX has no RTC). The Pi assigns the authoritative wall-clock
 # timestamp when it receives each line.
 #
+# Inbound command (Pi -> CPX, same USB-serial line, newline-terminated):
+#   FAULT   -- flash the NeoPixels red for FLASH_DURATION_S and sound the
+#              onboard speaker for TONE_DURATION_S, then resume the normal
+#              heartbeat. Sent by cpx_dashboard.py the moment the Pi
+#              confirms a fault -- the CPX only obeys, it doesn't decide
+#              (same perceive/decide/act split as the rest of the demo).
+#              Both are self-timed here (not host-cleared) so a dropped
+#              follow-up command can never leave the board stuck alerting.
+#
 # REQUIRED LIBRARIES (copy into CIRCUITPY/lib/ from the Adafruit
 # CircuitPython Bundle matching your CircuitPython version):
 #   adafruit_circuitplayground/  (folder)
@@ -48,9 +57,11 @@
 # (also works on 8.x; the mic fallback above is what makes 10.x fine).
 
 import math
+import sys
 import time
 
 import board
+import supervisor
 from adafruit_circuitplayground import cp
 
 ASSET_ID = "CPX-EDGE-01"
@@ -58,6 +69,11 @@ SAMPLE_HZ = 10
 PERIOD_S = 1.0 / SAMPLE_HZ
 
 MIC_SAMPLES = 160  # ~10 ms at 16 kHz; enough for a loudness estimate, cheap on RAM
+
+FLASH_DURATION_S = 3    # how long a "FAULT" command flashes the LEDs red
+FLASH_HZ = 2            # flash rate while a fault is active
+TONE_HZ = 1500          # alert tone frequency (onboard speaker)
+TONE_DURATION_S = 1     # how long a "FAULT" command sounds the alert tone
 
 PROTOCOL_HEADER = (
     "# CPX-FRAME v1: device_ts_ms,asset_id,accel_x_ms2,accel_y_ms2,"
@@ -111,10 +127,36 @@ if mic is None:
     print("# mic: unavailable -- sound_level reported as 0 (accel/temp/button unaffected)")
 
 start = time.monotonic()
+flash_until = None  # monotonic deadline while a Pi-confirmed fault is flashing
+tone_until = None  # monotonic deadline while the alert tone is sounding
+cmd_buf = ""  # raw inbound command bytes, not yet a complete match
 
 while True:
     loop_start = time.monotonic()
     device_ts_ms = int((loop_start - start) * 1000)
+
+    # Non-blocking command check: read exactly the bytes already buffered
+    # (never more), so this can't stall the 10 Hz loop. Deliberately NOT
+    # input() -- that's a line editor built for a human typing at a
+    # terminal (waits on '\r', echoes keystrokes back over the same
+    # serial line), which doesn't match a raw "FAULT\n" write from the
+    # Pi's pyserial. A plain substring match on the raw bytes sidesteps
+    # both the line-ending mismatch and the echo.
+    if supervisor.runtime.serial_bytes_available:
+        cmd_buf += sys.stdin.read(supervisor.runtime.serial_bytes_available)
+        if "FAULT" in cmd_buf:
+            flash_until = loop_start + FLASH_DURATION_S
+            tone_until = loop_start + TONE_DURATION_S
+            cp.start_tone(TONE_HZ)
+            cmd_buf = ""
+        elif len(cmd_buf) > 32:
+            cmd_buf = cmd_buf[-32:]  # drop stale bytes, keep only the recent tail
+
+    # Tone runs for a shorter, independent window than the LED flash, so it
+    # gets its own stop check rather than reusing flash_until.
+    if tone_until is not None and loop_start >= tone_until:
+        cp.stop_tone()
+        tone_until = None
 
     try:
         accel_x, accel_y, accel_z = cp.acceleration
@@ -126,8 +168,15 @@ while True:
     sound = sound_level(mic, mic_buf)
     button_a = 1 if cp.button_a else 0
 
-    # heartbeat: dim green = alive/idle, red = manual fault trigger held
-    cp.pixels.fill((255, 0, 0) if button_a else (0, 15, 0))
+    # LED priority: a Pi-confirmed fault flashes red for FLASH_DURATION_S
+    # (overrides everything else); otherwise dim green = alive/idle, solid
+    # red = manual trigger held.
+    if flash_until is not None and loop_start < flash_until:
+        on = int(loop_start * FLASH_HZ * 2) % 2 == 0
+        cp.pixels.fill((255, 0, 0) if on else (0, 0, 0))
+    else:
+        flash_until = None
+        cp.pixels.fill((255, 0, 0) if button_a else (0, 15, 0))
 
     print(
         "{},{},{:.3f},{:.3f},{:.3f},{:.2f},{},{}".format(

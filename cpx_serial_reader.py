@@ -80,7 +80,12 @@ def find_cpx_port():
 def open_serial(port, timeout=1.0):
     import serial  # imported lazily -- not needed for --mock
 
-    return serial.Serial(port, BAUD_RATE, timeout=timeout)
+    # write_timeout bounds cpx_dashboard's FAULT-command write: without it,
+    # pyserial writes block forever by default, and since that write happens
+    # on the same thread that reads sensor frames, a stuck/unplugged board
+    # could freeze detection itself -- never allowed, per this repo's
+    # never-depends-on-anything-else-succeeding rule for the detection core.
+    return serial.Serial(port, BAUD_RATE, timeout=timeout, write_timeout=0.2)
 
 
 def parse_line(line):

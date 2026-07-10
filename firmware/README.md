@@ -44,6 +44,19 @@ readings over USB serial as clean CSV lines for `cpx_serial_reader.py`
   temp/sound values. It's the demo-safety fallback if a physical
   shake/warm doesn't read clearly on stage; NeoPixels turn red while
   held, dim green otherwise (alive/idle heartbeat).
+- **Fault alert (Pi -> CPX):** the moment `cpx_dashboard.py` confirms a
+  fault, it writes a `FAULT` command back over the same USB-serial
+  connection. The firmware flashes all 10 NeoPixels red for
+  `FLASH_DURATION_S` and sounds the onboard speaker at `TONE_HZ` for
+  `TONE_DURATION_S` (both in `cpx_sensor.py`, currently 3 s / 1 s), then
+  resumes the normal heartbeat. Both are self-timed on the CPX side (not
+  host-cleared), so a dropped follow-up message can't leave the board
+  stuck alerting. The command is read via a raw non-blocking byte-buffer
+  check (`supervisor.runtime.serial_bytes_available` + `sys.stdin.read`)
+  rather than `input()` — `input()` is a line editor built for a human
+  typing at a terminal (waits on `\r`, echoes keystrokes back over the
+  same serial line), which doesn't match a raw `"FAULT\n"` write from the
+  Pi's pyserial and can block the sample loop indefinitely.
 - **Microphone on CircuitPython 10.x:** the CircuitPlayground library
   stubs out `cp.sound_level` as "unsupported on Express", so the firmware
   drives the PDM mic directly via `audiobusio` and computes a

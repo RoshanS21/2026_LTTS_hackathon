@@ -106,17 +106,24 @@ driving a servo.
 
 | # | File | What it does |
 |---|------|---------------|
-| 1a | `firmware/cpx_sensor.py` | CircuitPython firmware for the CPX: streams onboard accelerometer/temperature/mic-loudness as clean CSV lines over USB serial at 10 Hz. A fault is physically inducible — shake the board (accel spike) or warm it (temp rise). Button A is a transparent manual-trigger flag for demo safety, reported as-is, never blended into sensor values. Drives the PDM mic directly via `audiobusio` (CircuitPython 10.x stubs `cp.sound_level` on the CPX) with a graceful no-mic fallback. See `firmware/README.md`. |
+| 1a | `firmware/cpx_sensor.py` | CircuitPython firmware for the CPX: streams onboard accelerometer/temperature/mic-loudness as clean CSV lines over USB serial at 10 Hz. A fault is physically inducible — shake the board (accel spike) or warm it (temp rise). Button A is a transparent manual-trigger flag for demo safety, reported as-is, never blended into sensor values. Drives the PDM mic directly via `audiobusio` (CircuitPython 10.x stubs `cp.sound_level` on the CPX) with a graceful no-mic fallback. Also listens for a `FAULT` command from the Pi (same USB-serial line) and flashes all 10 NeoPixels red + sounds the onboard speaker, both self-timed so a dropped message can't stick. See `firmware/README.md`. |
 | 1b | `cpx_serial_reader.py` | Pi-side reader: auto-detects the CPX by USB VID, parses its serial CSV into frame dicts (assigns the wall-clock timestamp the CPX can't), skips malformed lines instead of crashing, and appends every live run to a CSV. `--mock` generates synthetic frames for hardware-free testing. |
 | 2 | `cpx_detector.py` | The CPX **signal profile** (vibration-vs-gravity / temp / mic-RMS bounds, Button A as the honest manual-confirm trigger) that **imports the 3-tier detection core from `anomaly_detector.py`** — so the live and simulated pipelines share one detector and can't drift. |
 | 3 | `llm_summary.py --profile cpx` | The same edge-LLM engine, made profile-aware: CPX events get vibration/thermal/acoustic prompts + fallback templates (from `cpx_detector.py`); the LLM call, timeout, warm-up, and fallback dispatch stay shared with the J1939 path. |
 | 4 | `firmware/esp32c6_actuator/` + `esp32_actuator.py` | ESP32-C6 Arduino servo firmware (serial `ALARM`/`CLEAR`/`PING`, "flagging" sweep) + a Pi-side serial client that reuses the shared `decide()` policy and mirrors `edge_actuator.Actuator`'s interface. Both degrade to a log-only mock. See `firmware/ESP32C6_ACTUATOR.md` (wiring + flashing). |
-| 5 | `cpx_dashboard.py` | The live serial-fed dashboard: baseline warm-up (fit the models on ~8 s of at-rest data — the honest train-offline/infer-online split), then per-frame detection → edge-LLM summary → actuator, streaming to a self-updating page with CPX sparklines, event cards, run stats, a bandwidth ledger, and the perceive→decide→act log. |
+| 5 | `cpx_dashboard.py` | The live serial-fed dashboard: baseline warm-up (fit the models on ~8 s of at-rest data — the honest train-offline/infer-online split), then per-frame detection → edge-LLM summary → actuator, streaming to a self-updating page with CPX sparklines, event cards, run stats, a bandwidth ledger, and the perceive→decide→act log. On a confirmed fault it also writes the `FAULT` command back to the CPX (LED flash + speaker tone) and fires an in-page phone alert (vibration + tone + screen flash) — see "Mobile / remote live view" below for phone access. |
 
 **Verified live:** a continuous shake produces bounded confirmed vibration
 events (~8 s each, force-closed so a persistent offset can't freeze one open),
 each with a real on-Pi AI diagnosis (~8 s), the actuator cycling ALARM/CLEAR,
 and ~90% bandwidth saved — no monitor-noise swarm.
+
+**CPX fault alert + mobile live view.** On a confirmed fault the CPX flashes
+red and sounds its speaker (implemented and reflashed onto the board; final
+on-stage visual/audio check still pending). Mobile access is verified live:
+the Pi hosts its own WiFi hotspot with a custom local DNS record, so a phone
+on that hotspot loads the dashboard at a plain hostname — no IP, no port. See
+"Mobile / remote live view" below.
 
 > **ESP32-C6 hardware note.** The demo C6 board failed hardware bring-up (the
 > chip stopped presenting on both its native USB and UART after an early servo
@@ -125,6 +132,40 @@ and ~90% bandwidth saved — no monitor-noise swarm.
 > LED** (`cpx_dashboard.py --gpio`), verified working; the servo path is
 > mock-verified and drop-in ready. The perceive→decide→act log stays real
 > either way.
+
+## Mobile / remote live view
+
+In a real deployment there's no laptop next to the machine, so the dashboard
+needs to be viewable from a phone with nothing but the Pi itself providing
+the network — no home WiFi, no internet required. The Pi hosts its own
+hotspot and resolves a plain hostname to itself, so a phone gets a clean URL
+with no IP address and no port:
+
+```bash
+# One-time setup (see conversation/session notes for full detail):
+# 1. Pi broadcasts its own WiFi (needs a second network path, e.g. Ethernet,
+#    for your own management access -- the hotspot takes over wlan0):
+sudo nmcli device wifi hotspot ssid edge-ecu password "maintain123"
+
+# 2. Custom local DNS record so phones get a name instead of an IP
+#    (NetworkManager's hotspot already runs its own dnsmasq instance):
+echo "address=/edge-ecu.box/10.42.0.1" | sudo tee /etc/NetworkManager/dnsmasq-shared.d/dashboard.conf
+sudo nmcli connection down Hotspot && sudo nmcli connection up Hotspot
+
+# 3. Run the dashboard on port 80 (needs sudo) so the URL needs no port:
+sudo python3 cpx_dashboard.py --gpio --http-port 80
+#   (or: sudo python3 dashboard.py --port 80   for the simulated J1939 path)
+```
+
+Phone: join the `edge-ecu` WiFi, browse to **http://edge-ecu.box** — verified
+working live. The dashboard page also fires a phone-side alert (vibration +
+tone + screen flash) the moment a fault is confirmed, so the phone doesn't
+need to be actively watched to notice.
+
+**Known gap:** `cpx_dashboard.py` has no serial-reconnect logic. If the CPX's
+serial connection drops even once (a transient USB hiccup), the pipeline
+thread dies silently and the dashboard freezes on stale data until it's
+manually restarted — worth hardening before a long unattended run.
 
 ## Software pipeline (recorded-backup path)
 

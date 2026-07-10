@@ -141,11 +141,14 @@ class SummaryWorker:
             self.queue.task_done()
 
 
-def frame_source(args):
+def frame_source(args, ctx):
     """Yield (byte_len, frame_dict) from the CPX -- live serial or synthetic
     mock -- reusing cpx_serial_reader's parser and mock so the wire format
-    can't drift from the real reader."""
+    can't drift from the real reader. Stashes the open serial handle on
+    ctx.ser (None in --mock) so the pipeline can write the FAULT command
+    back to the board on the same connection."""
     if args.mock:
+        ctx.ser = None
         _mutate(lambda s: s.update(mode="mock"))
         for line in cpx_serial_reader.mock_lines(10.0, args.fault_at, args.fault_duration):
             frame = cpx_serial_reader.parse_line(line)
@@ -158,6 +161,7 @@ def frame_source(args):
             raise RuntimeError("no CPX serial port found (plug it in, pass --port, "
                                "or use --mock)")
         ser = cpx_serial_reader.open_serial(port)
+        ctx.ser = ser
         print(f"CPX connected on {port}", flush=True)
         for raw in ser:
             frame = cpx_serial_reader.parse_line(raw.decode("utf-8", "replace"))
@@ -171,7 +175,18 @@ def feat_vec(frame):
 
 def run_pipeline(args, actuator):
     _mutate(lambda s: s.update(status="connecting"))
-    src = frame_source(args)
+    ctx = SimpleNamespace(ser=None)
+    src = frame_source(args, ctx)
+
+    def flash_cpx_led():
+        """Best-effort: tell the CPX to flash red for 60s on a confirmed
+        fault. Never allowed to affect detection -- no-ops in --mock or if
+        the write fails mid-demo."""
+        if ctx.ser is not None:
+            try:
+                ctx.ser.write(b"FAULT\n")
+            except Exception:  # noqa: BLE001
+                pass
 
     # Warm the LLM in parallel with baseline collection so the first summary
     # doesn't pay the cold-load cost on stage.
@@ -334,6 +349,8 @@ def run_pipeline(args, actuator):
                     })
                 _mutate(open_card)
                 actuator.handle_event(snap, trigger=snap["trigger"])
+                if oe["confirmed"]:
+                    flash_cpx_led()
                 oe["actuated"] = oe["confirmed"]
             elif oe["promoted"] and confirm and not oe["actuated"]:
                 idx = oe["state_idx"]
@@ -346,6 +363,7 @@ def run_pipeline(args, actuator):
                 _mutate(upgrade)
                 actuator.handle_event({"confirmed": True, "asset_id": oe["asset_id"]},
                                       trigger="sensor")
+                flash_cpx_led()
                 oe["actuated"] = True
 
             if oe["promoted"]:
@@ -405,6 +423,8 @@ PAGE = """
   #alarm { background: #dc2626; animation: pulse 0.8s infinite; }
   #manual { background: #7c3aed; }
   @keyframes pulse { 50% { opacity: 0.45; } }
+  @keyframes flashBg { 50% { background: #7f1d1d; } }
+  body.flash-alert { animation: flashBg 0.5s 6; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
            gap: 10px; }
   .tile { background: #1e293b; border-radius: 10px; padding: 10px 14px; }
@@ -461,13 +481,43 @@ PAGE = """
 
 <script>
 let lastVersion = -1;
+let prevAlarmActive = false;
+let audioCtx = null;
+function unlockAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  }
+}
+document.addEventListener('touchstart', unlockAudio, {once: true});
+document.addEventListener('click', unlockAudio, {once: true});
+
+// Fault notification for a phone with this page open: vibrate + beep + flash.
+// Fires once per alarm-active edge (armed -> engaged), matching exactly when
+// the actuator itself engages, never on unconfirmed monitor events.
+function fireFaultAlert() {
+  if (navigator.vibrate) navigator.vibrate([300, 100, 300, 100, 300]);
+  try {
+    unlockAudio();
+    if (audioCtx) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start(); osc.stop(audioCtx.currentTime + 0.6);
+    }
+  } catch (e) {}
+  document.body.classList.add('flash-alert');
+  setTimeout(() => document.body.classList.remove('flash-alert'), 3000);
+}
+
 const STATUS_COLORS = {starting:'#475569', connecting:'#475569', baseline:'#0891b2',
                        warming:'#7c3aed', streaming:'#2563eb', done:'#16a34a', error:'#dc2626'};
 // [label, unit, bound, kind]; vibration bound is the upper gravity+dev line.
 const SIG_LABELS = {
   accel_mag_ms2: ['Vibration |accel|', 'm/s\\u00b2', 17.8, 'over'],
-  temp_c: ['Temperature', '\\u00b0C', 30, 'over'],
-  sound_level: ['Acoustic (mic RMS)', '', 400, 'over'],
+  temp_c: ['Temperature', '\\u00b0C', 31, 'over'],
+  sound_level: ['Acoustic (mic RMS)', '', 1000, 'over'],
 };
 const SIG_ORDER = Object.keys(SIG_LABELS);
 
@@ -593,6 +643,8 @@ function render(d) {
   s.textContent = d.status; s.style.background = STATUS_COLORS[d.status] || '#475569';
   document.getElementById('alarm').style.display = d.alarm_active ? 'inline-block' : 'none';
   document.getElementById('manual').style.display = d.button ? 'inline-block' : 'none';
+  if (d.alarm_active && !prevAlarmActive) fireFaultAlert();
+  prevAlarmActive = d.alarm_active;
   renderTiles(d); renderSigs(d); renderEvents(d); renderActions(d);
 }
 

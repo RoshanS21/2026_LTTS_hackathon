@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Edge-AI predictive-maintenance demo for the LTTS hackathon, running **on the Raspberry Pi 5 itself** (this machine is the demo hardware — an "edge ECU"). Two parallel demo paths share one detection core:
 
-- **Live hardware path (the on-stage story, in progress):** Circuit Playground Express sensor edge → USB serial → Pi (detection + LLM + dashboard) → ESP32-C6 servo actuator. Built pieces: `firmware/cpx_sensor.py` (CPX CircuitPython firmware), `cpx_serial_reader.py` (Pi-side reader), `cpx_detector.py` (CPX signal profile for the detector). Remaining pieces are listed in `README.md` ("Live hardware pipeline").
+- **Live hardware path (the on-stage story, fully built & verified):** Circuit Playground Express sensor edge → USB serial → Pi (detection + LLM + `cpx_dashboard.py`) → GPIO17 LED / ESP32-C6 servo actuator. Pieces: `firmware/cpx_sensor.py` (CPX CircuitPython firmware — also flashes/tones the board on a Pi-confirmed fault), `cpx_serial_reader.py` (Pi-side reader), `cpx_detector.py` (CPX signal profile), `cpx_dashboard.py` (the live streaming dashboard, also reachable from a phone — see README "Mobile / remote live view"). See `README.md` ("Live hardware pipeline") for full detail.
 - **Simulated J1939 path (fully built, the recorded-backup fallback):** `j1939_generator.py` → synthetic CSVs → `anomaly_detector.py` → `llm_summary.py` → `dashboard.py` → `edge_actuator.py` (GPIO17 alarm). This path must keep working exactly as documented in `README.md` — it is the on-stage fallback if the hardware chain hiccups.
 
 ## Commands
@@ -14,7 +14,7 @@ Edge-AI predictive-maintenance demo for the LTTS hackathon, running **on the Ras
 No build system or test suite; verification is running the scripts (each has a docstring with usage). Syntax check after edits:
 
 ```bash
-python3 -m py_compile anomaly_detector.py dashboard.py edge_actuator.py llm_summary.py j1939_generator.py benchmark_edge_llm.py cpx_serial_reader.py cpx_detector.py
+python3 -m py_compile anomaly_detector.py dashboard.py edge_actuator.py llm_summary.py j1939_generator.py benchmark_edge_llm.py cpx_serial_reader.py cpx_detector.py cpx_dashboard.py esp32_actuator.py firmware/cpx_sensor.py
 ```
 
 ```bash
@@ -40,6 +40,10 @@ python3 cpx_serial_reader.py --mock --fault-at 5 --fault-duration 4
 
 # CPX-path detection on a recorded live run
 python3 cpx_detector.py --csv data/cpx_live_run.csv
+
+# Live CPX hardware dashboard (the on-stage demo)
+python3 cpx_dashboard.py --gpio
+python3 cpx_dashboard.py --mock --fault-at 10   # rehearse with no hardware
 ```
 
 Dependencies come from apt (prebuilt arm64 wheels), not pip: `python3-sklearn python3-flask python3-numpy python3-gpiozero python3-serial`. The LLM is a local Ollama serving `qwen2.5:1.5b` at 127.0.0.1:11434.
@@ -61,5 +65,8 @@ Dependencies come from apt (prebuilt arm64 wheels), not pip: `python3-sklearn py
 ## Hardware/environment gotchas
 
 - Only one process can hold a serial port — close `screen`/Mu/Thonny before running `cpx_serial_reader.py`. Serial access needs the `dialout` group. See `firmware/PI_TEST_NOTES.md`.
-- The CPX auto-detects by Adafruit USB VID 0x239A, usually `/dev/ttyACM0`. Firmware install steps are in `firmware/README.md` (CircuitPython 10.x; `code.py` auto-runs on reset).
+- The CPX auto-detects by Adafruit USB VID 0x239A, usually `/dev/ttyACM0`. Firmware install steps are in `firmware/README.md` (CircuitPython 10.x; `code.py` auto-runs on reset). After editing `firmware/cpx_sensor.py`, it must be re-copied onto the mounted `CIRCUITPY` drive as `code.py` to take effect — CircuitPython auto-reloads on write, which resets the board and drops any open serial connection (restart whatever Pi-side process was reading it).
 - `dashboard.py` opens a browser tab; over plain SSH use `--no-open`. Without wired hardware use `--no-gpio`.
+- **Pi -> CPX command channel:** `cpx_dashboard.py` writes a `FAULT\n` command back over the same serial connection the instant a fault is confirmed, so the CPX can flash its NeoPixels + sound its speaker (both self-timed on the CPX side). The firmware reads this via a raw `supervisor.runtime.serial_bytes_available` + `sys.stdin.read()` byte-buffer check — **not** `input()`, which is a line editor that can block waiting for `\r` and echoes characters back over the same line; that mismatch previously froze the CPX's whole sample loop (and therefore the whole dashboard, since frames stopped arriving) the instant a fault fired.
+- **No serial-reconnect logic.** If `cpx_dashboard.py`'s connection to the CPX drops for any reason (even a one-off transient USB hiccup), the pipeline thread dies silently and the dashboard freezes on stale data forever — Flask stays up, but `/api/state` never updates again. There's no retry/reopen. Diagnose by checking whether `frames` in `/api/state` is still incrementing; the fix today is just restarting the process. Worth adding a reconnect loop before an unattended long run.
+- **Mobile/phone live view:** the Pi can host its own WiFi hotspot (`sudo nmcli device wifi hotspot ssid edge-ecu password "maintain123"`) with a custom local DNS record (`/etc/NetworkManager/dnsmasq-shared.d/dashboard.conf`: `address=/edge-ecu.box/10.42.0.1`), so a phone joined to that hotspot can browse `http://edge-ecu.box` with no IP and no port — requires running the dashboard with `sudo ... --http-port 80` (or `--port 80` for `dashboard.py`, which uses a different flag name than `cpx_dashboard.py`'s `--http-port`). Needs a second network path (e.g. Ethernet) for your own management access, since the hotspot takes over `wlan0`. See README.md "Mobile / remote live view" for the full recipe.

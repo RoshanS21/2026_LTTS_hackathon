@@ -16,6 +16,8 @@ results"), and we mark clearly what is *built & verified* vs. *on the roadmap*
 | CPX-path detection + edge-LLM summaries (`cpx_detector.py` / profile-aware `llm_summary.py`, share the J1939 core) | **Built & verified on real hardware** |
 | Live serial-fed dashboard (`cpx_dashboard.py`): sensor → detect → LLM → actuate, streaming | **Built & verified end-to-end on live CPX** (shake/warm/Button A → confirmed event → on-Pi AI diagnosis → actuator) |
 | ESP32-C6 servo actuator (firmware + Pi client) | Built & mock-verified; **GPIO alarm is the live physical actuator** (the demo C6 board failed hardware bring-up — a spare flashes in minutes) |
+| Sensor-edge fault alert (CPX flashes all 10 NeoPixels + sounds its speaker on a Pi-confirmed fault) | Built, firmware reflashed onto the board; final on-stage visual/audio check pending |
+| Mobile live view (Pi hosts its own WiFi hotspot + local DNS, phone loads the dashboard with no IP/port; phone-side vibrate/tone/flash alert on a confirmed fault) | **Built & verified live** — phone confirmed reaching the dashboard over the Pi's own hotspot |
 | RUL projection, on-device service-manual RAG | **Roadmap differentiators** |
 
 ---
@@ -88,6 +90,20 @@ zero network/LLM dependency; the LLM is the *only* layer permitted to fail.
   33→1866). We even found and fixed a platform bug: `cp.sound_level` is
   unsupported on the Express under CircuitPython 10.x, so the firmware drives
   the PDM mic directly with a graceful fallback.
+- **Bidirectional actuation, closing the loop at the sensor edge itself.** On
+  a confirmed fault, the Pi writes a command back to the CPX over the same
+  USB-serial link, which flashes all 10 NeoPixels and sounds its onboard
+  speaker — physical operator feedback right at the point of the fault, not
+  just at the dashboard. Getting this right surfaced a second platform
+  lesson: CircuitPython's `input()` is a line editor for a human typing at a
+  terminal (blocks on `\r`, echoes characters back over the same line), not
+  a safe way to receive a raw command from another program — it silently
+  froze the board's whole sample loop the instant a command arrived. Fixed
+  with a raw non-blocking byte-buffer read instead.
+- **Mobile-first deployment story.** The Pi hosts its own WiFi hotspot with a
+  custom local DNS record, so a phone gets the live dashboard at a plain
+  hostname (no IP, no port) with zero external network dependency — matching
+  the "no laptop next to the machine" reality of an actual field deployment.
 - **Graceful degradation at every layer** (the "recorded-backup mindset"): GPIO
   degrades to a logging mock if a wire falls out; the LLM falls back to a
   template on timeout; the serial reader skips malformed lines instead of
