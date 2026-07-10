@@ -226,7 +226,7 @@ def run_pipeline(args, actuator):
     iforest = IsolationForest(n_estimators=200, contamination=args.contamination,
                               random_state=42).fit(scaler.transform(base))
     med, mad = cusum_baseline(base)
-    cusum = CusumDetector(med, mad)
+    cusum = CusumDetector(med, mad, h=args.cusum_h)
     base_med, base_mad = med, mad  # for peak-severity snapshotting
 
     worker = SummaryWorker(args.host, args.model, args.timeout, CPX_PROFILE)
@@ -304,8 +304,13 @@ def run_pipeline(args, actuator):
             if severity > oe["peak"]["sev"]:
                 oe["peak"] = {"sev": severity, "signals": signals}
 
-            if not oe["promoted"] and (
-                    oe["confirmed"] or oe["flag_count"] >= args.min_unconfirmed):
+            # Confirmed events (hard breach / Button A) always promote.
+            # Statistical-only runs promote to a "monitor" event only if they
+            # sustain past the evidence floor -- unless --confirmed-only, which
+            # suppresses monitor cards entirely for a hard-fault-only feed.
+            statistical_ok = (not args.confirmed_only
+                              and oe["flag_count"] >= args.min_unconfirmed)
+            if not oe["promoted"] and (oe["confirmed"] or statistical_ok):
                 oe["promoted"] = True
                 oe["state_idx"] = len(STATE["events"])
                 snap = {
@@ -612,7 +617,13 @@ def main():
     ap.add_argument("--host", default=DEFAULT_HOST)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
-    ap.add_argument("--contamination", type=float, default=0.08)
+    ap.add_argument("--contamination", type=float, default=0.05,
+                    help="IsolationForest outlier fraction; lower = fewer monitor events")
+    ap.add_argument("--cusum-h", type=float, default=12.0,
+                    help="CUSUM decision threshold; higher = less drift-sensitive (fewer monitors)")
+    ap.add_argument("--confirmed-only", action="store_true",
+                    help="Suppress statistical 'monitor' events entirely; only hard-breach / "
+                         "Button A events appear (cleanest feed for a busy demo)")
     ap.add_argument("--baseline-seconds", type=float, default=8.0,
                     help="Seconds of at-rest sensor data to train the statistical models on")
     # The CPX streams ~10 Hz (vs the J1939 path's 1 Hz), so evidence is counted
@@ -620,8 +631,9 @@ def main():
     # match: ~1.2 s of bridging and ~1.8 s of sustained statistical evidence,
     # so one shake reads as one event and sub-second jitter is debounced rather
     # than spawning a monitor card per twitch.
-    ap.add_argument("--min-unconfirmed", type=int, default=18,
-                    help="Evidence floor (flagged frames, ~10 Hz) before a statistical-only event")
+    ap.add_argument("--min-unconfirmed", type=int, default=30,
+                    help="Evidence floor (flagged frames, ~10 Hz => ~3 s) before a "
+                         "statistical-only event; higher = fewer monitor events")
     ap.add_argument("--merge-gap", type=int, default=12,
                     help="Hysteresis: clear frames (~10 Hz) tolerated inside one event")
     ap.add_argument("--max-event-seconds", type=float, default=15.0,
