@@ -12,21 +12,28 @@ instead of raw telemetry — bandwidth/cloud-cost reduction, with the
 detection step itself never depending on a network connection or an LLM
 being available.
 
-## Two demo paths: live hardware + a recorded-backup software path
+## Two demo paths, both built: live hardware + a recorded-backup software path
 
-We're mid-pivot from a fully simulated pipeline to real physical hardware
-(three devices: a Circuit Playground Express sensor edge, the Pi running
-detection + LLM + dashboard, an ESP32-C6 driving a servo). **This is the
-live, on-stage story.** Pieces are being built in order — see
-`firmware/README.md` for what's done.
+**The live hardware story (the on-stage demo).** A Circuit Playground Express
+(CPX) sensor edge streams accelerometer/temperature/mic over USB serial to the
+Pi, which detects → diagnoses (edge LLM) → decides → actuates, and shows it all
+on a live web page: `cpx_serial_reader.py` → `cpx_detector.py` →
+`llm_summary.py --profile cpx` → actuator → `cpx_dashboard.py`. This is fully
+built and **verified end-to-end on real hardware** — shake/warm the board or
+press Button A and a confirmed event fires with an on-Pi AI diagnosis and a
+physical actuation. Run it with `python3 cpx_dashboard.py --gpio`.
 
-The original all-software pipeline (`j1939_generator.py` → synthetic J1939
-CSVs → `anomaly_detector.py` → `llm_summary.py` → `dashboard.py` →
-`edge_actuator.py` driving a GPIO alarm) is fully built, measured, and still
-committed below. Per this project's own "recorded-backup mindset" (see
-below), it now serves double duty as **the fallback demo path** if the live
-hardware chain hits a hiccup on stage — everything in the rest of this
-README still runs exactly as documented.
+**The simulated J1939 path (the recorded-backup).** The original all-software
+pipeline (`j1939_generator.py` → synthetic J1939 CSVs → `anomaly_detector.py`
+→ `llm_summary.py` → `dashboard.py` → `edge_actuator.py` driving a GPIO alarm)
+is fully built, measured, and reproducible. Per this project's own
+"recorded-backup mindset," it serves double duty as **the fallback demo path**
+if the live hardware chain hiccups on stage — everything in the rest of this
+README runs exactly as documented.
+
+Both paths **share one detection core** (`anomaly_detector.py`) and one LLM
+engine (`llm_summary.py`), so they can't drift apart — the CPX path only adds
+its own signal profile.
 
 ## Measured results (this Pi 5, reproducible from the defaults)
 
@@ -91,21 +98,33 @@ All four are committed under `data/`; regenerate any time with
   diagnosis, and if the LLM is slow/unreachable, a deterministic templated
   summary takes over — the demo has no silent failure mode.
 
-## Live hardware pipeline (in progress)
+## Live hardware pipeline (built & verified on real hardware)
 
 Three physical devices: a Circuit Playground Express (CPX) sensor edge, the
 Raspberry Pi 5 (detection + LLM + dashboard), and an ESP32-C6 actuator ECU
-driving a servo (optionally reading a 5V Wiegand badge reader for
-identity/audit — strictly optional, never gates the core loop).
+driving a servo.
 
 | # | File | What it does |
 |---|------|---------------|
-| 1a | `firmware/cpx_sensor.py` | CircuitPython firmware for the CPX: streams onboard accelerometer/temperature/mic-loudness as clean CSV lines over USB serial at 10Hz. A fault is physically inducible — shake the board (accel spike) or warm it (temp rise). Button A is a transparent manual-trigger flag for demo safety, reported as-is, never blended into sensor values. See `firmware/README.md` for install + on-stage notes. |
-| 1b | `cpx_serial_reader.py` | Pi-side reader: auto-detects the CPX by USB VID, parses its serial CSV into frame dicts (assigns the wall-clock timestamp the CPX itself can't), skips malformed lines with a warning instead of crashing, and appends every live run to a CSV for the recorded-backup pile. `--mock` generates synthetic frames (with an optional injected shake burst) so downstream pieces can be built/tested without hardware attached. |
-| 2 | *(next)* | Anomaly detection adapted to consume live CPX frames instead of J1939 CSV rows. |
-| 3 | *(next)* | LLM summary layer — reuse `llm_summary.py`'s prompt/fallback pattern against the new signal set. |
-| 4 | *(next)* | ESP32-C6 servo firmware (+ optional Wiegand reader, level-shifted). |
-| 5 | *(next)* | Flask dashboard adapted for the live serial-fed pipeline. |
+| 1a | `firmware/cpx_sensor.py` | CircuitPython firmware for the CPX: streams onboard accelerometer/temperature/mic-loudness as clean CSV lines over USB serial at 10 Hz. A fault is physically inducible — shake the board (accel spike) or warm it (temp rise). Button A is a transparent manual-trigger flag for demo safety, reported as-is, never blended into sensor values. Drives the PDM mic directly via `audiobusio` (CircuitPython 10.x stubs `cp.sound_level` on the CPX) with a graceful no-mic fallback. See `firmware/README.md`. |
+| 1b | `cpx_serial_reader.py` | Pi-side reader: auto-detects the CPX by USB VID, parses its serial CSV into frame dicts (assigns the wall-clock timestamp the CPX can't), skips malformed lines instead of crashing, and appends every live run to a CSV. `--mock` generates synthetic frames for hardware-free testing. |
+| 2 | `cpx_detector.py` | The CPX **signal profile** (vibration-vs-gravity / temp / mic-RMS bounds, Button A as the honest manual-confirm trigger) that **imports the 3-tier detection core from `anomaly_detector.py`** — so the live and simulated pipelines share one detector and can't drift. |
+| 3 | `llm_summary.py --profile cpx` | The same edge-LLM engine, made profile-aware: CPX events get vibration/thermal/acoustic prompts + fallback templates (from `cpx_detector.py`); the LLM call, timeout, warm-up, and fallback dispatch stay shared with the J1939 path. |
+| 4 | `firmware/esp32c6_actuator/` + `esp32_actuator.py` | ESP32-C6 Arduino servo firmware (serial `ALARM`/`CLEAR`/`PING`, "flagging" sweep) + a Pi-side serial client that reuses the shared `decide()` policy and mirrors `edge_actuator.Actuator`'s interface. Both degrade to a log-only mock. See `firmware/ESP32C6_ACTUATOR.md` (wiring + flashing). |
+| 5 | `cpx_dashboard.py` | The live serial-fed dashboard: baseline warm-up (fit the models on ~8 s of at-rest data — the honest train-offline/infer-online split), then per-frame detection → edge-LLM summary → actuator, streaming to a self-updating page with CPX sparklines, event cards, run stats, a bandwidth ledger, and the perceive→decide→act log. |
+
+**Verified live:** a continuous shake produces bounded confirmed vibration
+events (~8 s each, force-closed so a persistent offset can't freeze one open),
+each with a real on-Pi AI diagnosis (~8 s), the actuator cycling ALARM/CLEAR,
+and ~90% bandwidth saved — no monitor-noise swarm.
+
+> **ESP32-C6 hardware note.** The demo C6 board failed hardware bring-up (the
+> chip stopped presenting on both its native USB and UART after an early servo
+> miswire; a spare flashes in minutes with the recipe in
+> `firmware/ESP32C6_ACTUATOR.md`). So the **live physical actuator is the GPIO17
+> LED** (`cpx_dashboard.py --gpio`), verified working; the servo path is
+> mock-verified and drop-in ready. The perceive→decide→act log stays real
+> either way.
 
 ## Software pipeline (recorded-backup path)
 
@@ -149,7 +168,11 @@ sudo apt install -y python3-sklearn python3-flask python3-numpy python3-gpiozero
 # Optional hardware: LED (or buzzer/relay module) on GPIO17 + GND.
 # Without it everything still runs — the actuator logs its decisions instead.
 
-# CPX: flash firmware/cpx_sensor.py per firmware/README.md, then plug into the Pi over USB.
+# CPX sensor: flash CircuitPython 10.x + firmware/cpx_sensor.py per firmware/README.md,
+# then plug into the Pi over USB (auto-detected by Adafruit USB VID).
+
+# ESP32-C6 servo (optional): wire + flash per firmware/ESP32C6_ACTUATOR.md
+# (needs arduino-cli + the esp32 core + ESP32Servo; the servo needs its OWN 5V).
 ```
 
 ## Usage
@@ -174,8 +197,13 @@ python3 llm_summary.py --csv data/demo_run.csv
 # 5. Hardware self-test: 3 alarm pulses on GPIO17
 python3 edge_actuator.py --test
 
-# 6. Run the full live demo (run this one on the Pi's own desktop session,
-#    not over a plain SSH shell, so the browser tab has a display to open into).
+# 6. LIVE HARDWARE DEMO: the real CPX loop (run on the Pi's own desktop so the
+#    browser tab opens). Keep the board still for the ~8s baseline, then shake /
+#    warm / press Button A. --gpio drives the real GPIO17 LED on a confirmed fault.
+python3 cpx_dashboard.py --gpio
+python3 cpx_dashboard.py --mock --fault-at 10   # rehearse with no hardware
+
+# 7. RECORDED-BACKUP DEMO: the simulated J1939 loop (fallback if hardware hiccups).
 #    Default replay is 30x: the 30-min dataset plays in ~60s.
 python3 dashboard.py
 python3 dashboard.py --speed 60 --no-open --no-gpio   # headless / no hardware
