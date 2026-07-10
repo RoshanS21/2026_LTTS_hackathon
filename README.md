@@ -118,13 +118,20 @@ events (~8 s each, force-closed so a persistent offset can't freeze one open),
 each with a real on-Pi AI diagnosis (~8 s), the actuator cycling ALARM/CLEAR,
 and ~90% bandwidth saved — no monitor-noise swarm.
 
-> **ESP32-C6 hardware note.** The demo C6 board failed hardware bring-up (the
-> chip stopped presenting on both its native USB and UART after an early servo
-> miswire; a spare flashes in minutes with the recipe in
-> `firmware/ESP32C6_ACTUATOR.md`). So the **live physical actuator is the GPIO17
-> LED** (`cpx_dashboard.py --gpio`), verified working; the servo path is
-> mock-verified and drop-in ready. The perceive→decide→act log stays real
-> either way.
+> **ESP32-C6 hardware note.** The original demo C6 died during bring-up (stopped
+> presenting on both native USB and UART after an early servo miswire). A spare
+> was flashed in minutes (macOS recipe + gotchas in
+> `firmware/ESP32C6_ACTUATOR.md`) and the **full servo path is now
+> hardware-verified end to end, physical motion included**: `esp32_actuator.py
+> --test` drives the board through the shared `decide()` policy (auto-detected on
+> `/dev/cu.usbmodem*`, VID `0x303A`), the servo physically sweeps on each ALARM
+> pulse, and unconfirmed events correctly log `MONITOR` with no actuation.
+> The one bring-up gotcha worth knowing: **boot the C6 with the servo already
+> fully wired and powered — hot-plugging a servo onto a live C6 crashes its USB
+> and needs a power cycle to recover** (bisected + wiring in
+> `firmware/ESP32C6_ACTUATOR.md`). `cpx_dashboard.py` defaults to the servo
+> actuator; `--gpio` swaps in the GPIO17 LED (also verified) as a no-external-
+> power fallback. The perceive→decide→act log stays real either way.
 
 ## Software pipeline (recorded-backup path)
 
