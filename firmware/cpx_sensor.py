@@ -20,6 +20,15 @@
 # GPIO backend): a fallback that's honest and visible, not one that
 # fakes sensor data.
 #
+# MICROPHONE NOTE (CircuitPython 10.x on the Circuit Playground Express):
+# the CircuitPlayground library's `cp.sound_level` is stubbed out as
+# "unsupported on Express" in current library builds, so we read the PDM
+# mic directly via audiobusio (which IS in the CPX build) and compute a
+# mean-subtracted RMS loudness ourselves. If mic setup fails for any
+# reason, we degrade gracefully: sound_level is reported as 0 and a
+# one-time "# mic: unavailable" comment is emitted -- the accel/temp/
+# button signals (the demo-critical ones) keep streaming regardless.
+#
 # Wire format (one line per sample, comma-separated, newline-terminated):
 #   device_ts_ms,asset_id,accel_x_ms2,accel_y_ms2,accel_z_ms2,temp_c,sound_level,button_a
 #
@@ -35,9 +44,12 @@
 #   adafruit_thermistor.mpy
 #   neopixel.mpy
 #
-# Tested target: CircuitPlayground Express, CircuitPython 8.x.
+# Tested target: CircuitPlayground Express, CircuitPython 10.2.1
+# (also works on 8.x; the mic fallback above is what makes 10.x fine).
 
+import math
 import time
+
 import board
 from adafruit_circuitplayground import cp
 
@@ -45,15 +57,58 @@ ASSET_ID = "CPX-EDGE-01"
 SAMPLE_HZ = 10
 PERIOD_S = 1.0 / SAMPLE_HZ
 
+MIC_SAMPLES = 160  # ~10 ms at 16 kHz; enough for a loudness estimate, cheap on RAM
+
 PROTOCOL_HEADER = (
     "# CPX-FRAME v1: device_ts_ms,asset_id,accel_x_ms2,accel_y_ms2,"
     "accel_z_ms2,temp_c,sound_level,button_a"
 )
 
+
+def setup_mic():
+    """Return (record_fn, sample_buffer) for the onboard PDM mic, or
+    (None, None) if the mic can't be initialised. Kept optional on purpose:
+    the mic is the least important of the four signals and must never stop
+    the accel/temp/button stream."""
+    try:
+        import array
+
+        import audiobusio
+
+        mic = audiobusio.PDMIn(
+            board.MICROPHONE_CLOCK,
+            board.MICROPHONE_DATA,
+            sample_rate=16000,
+            bit_depth=16,
+        )
+        buf = array.array("H", [0] * MIC_SAMPLES)
+        mic.record(buf, len(buf))  # discard the first (settling) capture
+        return mic, buf
+    except Exception:  # noqa: BLE001 -- any failure -> graceful no-mic mode
+        return None, None
+
+
+def sound_level(mic, buf):
+    """Mean-subtracted RMS of a fresh mic capture (AC loudness, DC removed).
+    Returns 0 if the mic is unavailable."""
+    if mic is None:
+        return 0
+    try:
+        mic.record(buf, len(buf))
+        mean = sum(buf) / len(buf)
+        return int(math.sqrt(sum((s - mean) ** 2 for s in buf) / len(buf)))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 cp.pixels.brightness = 0.3
 cp.pixels.fill((0, 0, 0))
 
+mic, mic_buf = setup_mic()
+
 print(PROTOCOL_HEADER)
+if mic is None:
+    print("# mic: unavailable -- sound_level reported as 0 (accel/temp/button unaffected)")
 
 start = time.monotonic()
 
@@ -68,7 +123,7 @@ while True:
         accel_x = accel_y = accel_z = 0.0
 
     temp_c = cp.temperature
-    sound_level = cp.sound_level
+    sound = sound_level(mic, mic_buf)
     button_a = 1 if cp.button_a else 0
 
     # heartbeat: dim green = alive/idle, red = manual fault trigger held
@@ -82,7 +137,7 @@ while True:
             accel_y,
             accel_z,
             temp_c,
-            sound_level,
+            sound,
             button_a,
         )
     )
