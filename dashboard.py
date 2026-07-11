@@ -363,7 +363,7 @@ PAGE = """
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Edge Maintenance Feed</title>
+<title>GEN-01 Engine ECU — Edge Maintenance Feed</title>
 <style>
   body { font-family: -apple-system, Roboto, sans-serif; background: #0f172a;
          color: #e2e8f0; margin: 0; padding: 16px; }
@@ -413,7 +413,7 @@ PAGE = """
 </style>
 </head>
 <body>
-  <h1>Edge Maintenance Feed</h1>
+  <h1>Edge Maintenance Feed — Standby Generator GEN-01 (Engine ECU, J1939)</h1>
   <div id="sub">asset: --</div>
   <div><span id="status">starting</span><span id="alarm">GPIO ALARM ACTIVE</span></div>
 

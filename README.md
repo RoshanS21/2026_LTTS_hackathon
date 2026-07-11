@@ -1,16 +1,45 @@
 # Edge-AI Predictive Maintenance — LTTS "Engineering Intelligence" Hackathon
 
-An edge-AI predictive maintenance demo for fleet/equipment telematics. A
-Raspberry Pi 5 acts as an "edge ECU": it streams sensor signals, runs
-anomaly detection on-device row-by-row, produces a 2-sentence natural-language
-maintenance summary via a small local LLM when a fault fires, and closes a
-full perceive → decide → act loop by driving a physical actuator autonomously
-on confirmed faults. Everything is shown on a live-updating web dashboard.
+An edge-AI predictive maintenance demo built around one concrete real-world
+use case: **GEN-01, a 500 kVA standby diesel generator** in a hospital
+basement plant room. A Raspberry Pi 5 acts as the site's "edge ECU": it
+streams sensor signals, runs anomaly detection on-device row-by-row, produces
+a 2-sentence natural-language maintenance summary via a small local LLM when
+a fault fires — personalized to *this* generator, not generic sensor talk —
+and closes a full perceive → decide → act loop by driving a physical actuator
+autonomously on confirmed faults. Everything is shown on a live-updating web
+dashboard.
 
 Pitch: compute on the edge, ship only high-value AI-summarized insights
 instead of raw telemetry — bandwidth/cloud-cost reduction, with the
 detection step itself never depending on a network connection or an LLM
 being available.
+
+## The use case: a standby generator that must never fail quietly
+
+A hospital's backup genset sits idle 99% of the time and is exercised by a
+short transfer test at fixed intervals; a fault that develops *between* tests
+is discovered exactly when it matters most — during a real outage. That is
+the textbook case for continuous edge monitoring, and both demo paths tell
+this one story:
+
+- **The J1939 simulated path is GEN-01's own engine ECU.** Real diesel
+  gensets speak J1939 natively — SPN 190 engine speed, SPN 110 coolant temp,
+  SPN 100 oil pressure, SPN 175 oil temp are exactly the signals this demo
+  synthesizes and detects on.
+- **The live CPX hardware is a retrofit sensor pod bolted to GEN-01's
+  frame** — the low-cost "add monitoring to an old genset" play. Frame
+  vibration ⇒ failing engine mount / coupling misalignment / misfire;
+  frame overheat ⇒ blocked radiator airflow / coolant loss / overload;
+  acoustic spike ⇒ engine knock / belt failure. The AI summaries diagnose in
+  those terms and recommend genset-specific actions (e.g. "hold the unit
+  from its next transfer test until mounts are inspected").
+
+Honesty note: the persona (name, rating, site — defined once in
+`benchmark_edge_llm.py` and imported everywhere) shapes only labels and the
+LLM story. Sensor values are always reported exactly as measured, and the
+manual Button A trigger is still reported as a technician inspection
+request, never dressed up as a sensor fault.
 
 ## Quick reference: start / stop the phone-facing dashboard
 
@@ -99,7 +128,7 @@ its own signal profile.
 |---|---|
 | Fault windows detected (all 4 scenarios combined) | **13/13**, 0 false alarms, 0 soft flags |
 | Predictive lead time (slow-decline scenario) | drift flagged **193 s before** the hard safety threshold broke |
-| Noise robustness (healthy scenario) | 0 events, 0 alarms; 90 noise blips debounced, injected sensor glitches ignored |
+| Noise robustness (healthy scenario) | 0 events, 0 alarms; 91 noise blips debounced, injected sensor glitches ignored |
 | Per-row inference cost (threshold + IsolationForest + CUSUM) | ~4 ms — real-time at 1 Hz with ~250× headroom |
 | Edge-LLM summary latency (`qwen2.5:1.5b`, on-Pi) | **~6–12 s** per 2-sentence diagnosis |
 | Bandwidth: raw J1939 vs. uplinked summaries | ~121 KB / 30-min window raw vs. ~3 KB of summaries — **~97% less uplink** |
@@ -149,8 +178,8 @@ All four are committed under `data/`; regenerate any time with
   that still logs every decision, so the agentic loop is judge-visible on
   the dashboard even if the LED wire falls out mid-demo.
 - **Two-tier edge.** Sensor-edge (the Pi, detection) and compute-edge (the
-  Pi or a gateway machine, LLM summary) mirrors a real SDV architecture (ECU
-  → domain controller → cloud).
+  Pi or a gateway machine, LLM summary) mirrors a real industrial-edge
+  architecture (genset engine ECU → site gateway → cloud).
 - **Recorded-backup mindset.** Every layer degrades gracefully: unconfirmed
   ML-only alerts get an honest "monitor" note instead of an invented
   diagnosis, and if the LLM is slow/unreachable, a deterministic templated

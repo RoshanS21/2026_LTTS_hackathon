@@ -133,8 +133,13 @@ def mock_lines(hz, fault_at, fault_duration):
 
         in_fault = fault_at is not None and fault_at <= elapsed_s < (fault_at + fault_duration)
 
-        ax = rng.uniform(-0.3, 0.3) + (rng.uniform(4, 8) if in_fault else 0.0)
-        ay = rng.uniform(-0.3, 0.3) + (rng.uniform(-6, 6) if in_fault else 0.0)
+        # Fault shake must SUSTAIN |accel|-gravity above cpx_detector's
+        # VIBRATION_DEV_MAX (8.0) on every frame, like a real on-stage shake
+        # (live captures hit |accel| 20-60), or the dashboard's sustained-
+        # shaking confirm gate never fires and the mock rehearsal shows
+        # no event at all.
+        ax = rng.uniform(-0.3, 0.3) + (rng.uniform(14, 24) if in_fault else 0.0)
+        ay = rng.uniform(-0.3, 0.3) + (rng.uniform(-10, 10) if in_fault else 0.0)
         az = 9.8 + rng.uniform(-0.2, 0.2)
         temp_c = 24.0 + rng.uniform(-0.3, 0.3) + (elapsed_s * 0.01 if in_fault else 0.0)
         sound_level = int(90 + rng.uniform(-10, 10) + (rng.uniform(0, 60) if in_fault else 0))

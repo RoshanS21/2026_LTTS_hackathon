@@ -44,7 +44,9 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
-DEFAULT_ASSET_ID = "VEHICLE"
+# The demo persona's standby diesel generator (see benchmark_edge_llm.py):
+# the J1939 stream plays the role of GEN-01's own engine ECU feed.
+DEFAULT_ASSET_ID = "GEN-01"
 
 # Baseline operating point -- matches the "2100 rpm / ~340 kPa" anomaly prompt
 # in benchmark_edge_llm.py so downstream pieces describe the same normal state.

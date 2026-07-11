@@ -576,7 +576,7 @@ PAGE = """
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Edge Maintenance Feed — Live CPX</title>
+<title>GEN-01 Standby Generator — Live Edge Maintenance</title>
 <style>
   body { font-family: -apple-system, Roboto, sans-serif; background: #0f172a;
          color: #e2e8f0; margin: 0; padding: 16px; }
@@ -668,8 +668,8 @@ PAGE = """
 </style>
 </head>
 <body>
-  <h1>Edge Maintenance Feed — Live CPX Sensor</h1>
-  <div id="sub">asset: --</div>
+  <h1>Edge Maintenance Feed — Standby Generator GEN-01</h1>
+  <div id="sub">sensor pod: --</div>
   <div><span id="status">starting</span>
        <span class="pill" id="alarm">ACTUATOR ENGAGED</span>
        <span class="pill" id="manual">MANUAL TRIGGER</span></div>
@@ -738,8 +738,8 @@ const STATUS_COLORS = {starting:'#475569', connecting:'#475569', baseline:'#0891
                        done:'#16a34a', error:'#dc2626'};
 // [label, unit, bound, kind]; vibration bound is the upper gravity+dev line.
 const SIG_LABELS = {
-  accel_mag_ms2: ['Vibration |accel|', 'm/s\\u00b2', 17.8, 'over'],
-  temp_c: ['Temperature', '\\u00b0C', 33, 'over'],
+  accel_mag_ms2: ['Frame vibration |accel|', 'm/s\\u00b2', 17.8, 'over'],
+  temp_c: ['Frame temperature', '\\u00b0C', 33, 'over'],
   sound_level: ['Acoustic (mic RMS)', '', 1000, 'over'],
 };
 const SIG_ORDER = Object.keys(SIG_LABELS);
@@ -872,7 +872,7 @@ function renderActions(d) {
 
 function render(d) {
   const st = d.stats || {};
-  let sub = `asset: ${d.asset_id || '--'} \\u00b7 ${d.mode || ''} \\u00b7 ${d.frames} frames`;
+  let sub = `sensor pod ${d.asset_id || '--'} \\u00b7 frame-mounted on GEN-01 \\u00b7 ${d.mode || ''} \\u00b7 ${d.frames} frames`;
   if (d.status === 'baseline') sub += ` \\u00b7 learning baseline (keep sensor at rest)`;
   document.getElementById('sub').textContent = sub;
   const s = document.getElementById('status');

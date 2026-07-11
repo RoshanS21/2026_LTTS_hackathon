@@ -43,6 +43,8 @@ import numpy as np
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
+from benchmark_edge_llm import ASSET_DESC, ASSET_SITE
+
 FEATURE_COLUMNS = [
     "spn190_engine_speed_rpm",
     "spn110_coolant_temp_c",
@@ -275,8 +277,9 @@ def format_anomaly_prompt(event):
     """Match benchmark_edge_llm.py's USER_PROMPT shape so piece 4 can feed
     this straight into the LLM summary call."""
     lines = [
-        f"Anomaly flagged on asset {event['asset_id']}.",
-        "Signal frame (J1939):",
+        f"Anomaly flagged on {event['asset_id']} ({ASSET_DESC}) "
+        f"at {ASSET_SITE}.",
+        "Engine ECU signal frame (J1939):",
     ]
     s = event["signals"]
     flagged = []
@@ -303,7 +306,7 @@ def format_anomaly_prompt(event):
         )
     target = " and ".join(flagged) if flagged else "the deviating signals"
     lines.append(f"Summarize the likely fault behind {target} and the "
-                 "recommended action.")
+                 "recommended action for this standby generator.")
     return "\n".join(lines)
 
 

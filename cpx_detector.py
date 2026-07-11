@@ -10,6 +10,13 @@ the signal columns, the hard-safety bounds, the fault semantics, and the
 LLM-ready prompt. Everything else is imported and reused, so the J1939
 simulated pipeline and this hardware pipeline can't drift apart.
 
+Use-case persona (shared with the J1939 path -- see benchmark_edge_llm.py):
+the CPX is a retrofit sensor pod bolted to the frame of GEN-01, a standby
+diesel generator. Vibration = failing engine mount / coupling misalignment /
+misfire; overheat = blocked radiator airflow / coolant loss / overload;
+loud acoustic = knocking / belt failure. The persona shapes only the LLM
+story and labels; sensor values are always reported as-is.
+
 Signals (from cpx_serial_reader.py frames):
   accel_mag_ms2  vibration -- magnitude of the accel vector. Rests at ~9.8
                  (gravity) regardless of board orientation; DEVIATION from
@@ -46,6 +53,7 @@ from anomaly_detector import (
     CusumDetector, cusum_baseline, cusum_flags, find_events, isoforest_flags,
     load_csv,
 )
+from benchmark_edge_llm import ASSET_DESC, ASSET_NAME, ASSET_SITE
 
 FEATURE_COLUMNS = [
     "accel_mag_ms2",
@@ -53,9 +61,11 @@ FEATURE_COLUMNS = [
     "sound_level",
 ]
 
+# Labels follow the genset persona: the pod is frame-mounted, so its accel
+# and thermistor read the generator frame, and the mic hears the enclosure.
 CPX_LABELS = {
-    "accel_mag_ms2": ("Vibration (accel magnitude)", "m/s^2"),
-    "temp_c": ("Board Temperature", "C"),
+    "accel_mag_ms2": ("Frame Vibration (accel magnitude)", "m/s^2"),
+    "temp_c": ("Frame Temperature", "C"),
     "sound_level": ("Acoustic Level (mic RMS)", ""),
 }
 
@@ -172,40 +182,48 @@ def infer_trigger(event):
 FALLBACK_TEMPLATES = {
     "vibration": {
         "cause": (
-            "Vibration magnitude of {accel_mag_ms2:.1f} m/s^2 deviates sharply "
-            "and continuously from the ~9.8 m/s^2 gravity baseline, consistent "
-            "with unbalanced or worn rotating machinery (bearing wear, "
-            "imbalance, or a loose mount)."
+            "Frame vibration of {accel_mag_ms2:.1f} m/s^2 on " + ASSET_NAME +
+            " deviates sharply and continuously from the ~9.8 m/s^2 at-rest "
+            "baseline, consistent with a failing engine mount, coupling "
+            "misalignment, or a misfiring cylinder."
         ),
-        "solution": "Recommend inspecting the drivetrain, bearings, and mounts before continued operation.",
+        "solution": (
+            "Recommend inspecting engine mounts and coupling alignment, and "
+            "holding the unit from its next transfer test until cleared."
+        ),
     },
     "overheat": {
         "cause": (
-            "Asset temperature of {temp_c:.1f} C exceeds the safe operating "
-            "limit, consistent with overheating from cooling loss, sustained "
-            "overload, or high ambient heat."
+            "Frame temperature of {temp_c:.1f} C on " + ASSET_NAME + " exceeds "
+            "the safe operating limit, consistent with blocked radiator "
+            "airflow, coolant loss, or sustained overload."
         ),
-        "solution": "Recommend reducing load and checking the cooling path before resuming operation.",
+        "solution": (
+            "Recommend checking radiator intake, enclosure louvres, and "
+            "coolant level before the unit is next called on."
+        ),
     },
     "loud_acoustic": {
         "cause": (
-            "Acoustic level of {sound_level:.0f} (mic RMS) has spiked well "
-            "above the quiet baseline, consistent with mechanical impact, "
-            "cavitation, or a component beginning to fail."
+            "Acoustic level of {sound_level:.0f} (mic RMS) in the " +
+            ASSET_NAME + " enclosure has spiked well above the quiet baseline, "
+            "consistent with engine knock, a failing belt, or mechanical impact."
         ),
-        "solution": "Recommend an acoustic and physical inspection of the asset.",
+        "solution": "Recommend an acoustic and visual inspection of the engine and enclosure.",
     },
     "manual": {
         "cause": (
-            "Operator pressed the manual inspection trigger on {asset_id}; the "
+            "Technician pressed the manual inspection button on sensor pod "
+            "{asset_id} (mounted on " + ASSET_NAME + "); the generator's "
             "vibration, temperature, and acoustic signals are within normal bounds."
         ),
-        "solution": "Recommend a manual inspection to confirm asset condition, as no automatic fault was detected.",
+        "solution": "Recommend a walk-around inspection to confirm generator condition, as no automatic fault was detected.",
     },
     "unknown": {
         "cause": (
-            "Sensor readings on {asset_id} deviate from baseline (vibration="
-            "{accel_mag_ms2:.1f} m/s^2, temp={temp_c:.1f} C, sound={sound_level:.0f})."
+            "Sensor pod {asset_id} readings on " + ASSET_NAME + " deviate from "
+            "baseline (vibration={accel_mag_ms2:.1f} m/s^2, temp={temp_c:.1f} C, "
+            "sound={sound_level:.0f})."
         ),
         "solution": "Recommend a manual inspection to confirm the root cause.",
     },
@@ -222,17 +240,38 @@ def fallback_summary(event):
     return tmpl["cause"].format(**fields), tmpl["solution"].format(**fields), trigger
 
 
+# One steering line per flagged channel: small on-device models latch onto
+# whatever context is offered, so name the genset-typical faults explicitly
+# instead of hoping a 1.5B model free-associates from "generator".
+GENSET_HINTS = {
+    "accel_mag_ms2": (
+        "abnormal frame vibration on this genset typically means a failing "
+        "engine mount, coupling misalignment, or a misfiring cylinder"
+    ),
+    "temp_c": (
+        "frame overheating on this genset typically means blocked radiator "
+        "airflow, coolant loss, or sustained overload"
+    ),
+    "sound_level": (
+        "a loud acoustic spike in this enclosure typically means engine "
+        "knock, a failing belt, or mechanical impact"
+    ),
+}
+
+
 def format_anomaly_prompt(event):
-    """CPX-shaped anomaly prompt for the LLM summary layer -- same structure
-    as anomaly_detector.format_anomaly_prompt but for machine-health signals
-    off a bench sensor rather than a J1939 engine ECU."""
+    """Genset-shaped anomaly prompt for the LLM summary layer -- same
+    structure as anomaly_detector.format_anomaly_prompt, but sourced from the
+    retrofit frame-mounted sensor pod on GEN-01 rather than its engine ECU."""
     lines = [
-        f"Anomaly flagged on monitored asset {event['asset_id']} "
-        "(vibration/thermal/acoustic sensor pack).",
+        f"Anomaly flagged on {ASSET_NAME} ({ASSET_DESC}) at {ASSET_SITE}.",
+        f"Source: frame-mounted sensor pod {event['asset_id']} "
+        "(vibration/thermal/acoustic).",
         "Signal frame:",
     ]
     s = event["signals"]
     flagged = []
+    flagged_cols = []
     for col in FEATURE_COLUMNS:
         label, unit = CPX_LABELS[col]
         value = s[col]
@@ -245,27 +284,33 @@ def format_anomaly_prompt(event):
             flag = "  <-- LOUD"
         if flag:
             flagged.append(label)
+            flagged_cols.append(col)
         unit_s = f" {unit}" if unit else ""
         lines.append(f"  {label}: {value:.1f}{unit_s}{flag}")
 
     if event.get("manual_trigger") and not flagged:
         lines.append(
-            "Operator pressed the manual inspection trigger; sensor signals "
-            "are within normal bounds."
+            "A technician pressed the pod's manual inspection button during "
+            "a walk-around; sensor signals are within normal bounds."
         )
-        lines.append("Summarize this as a manual inspection request and the "
-                     "recommended check.")
+        lines.append("Summarize this as a technician inspection request on "
+                     "the generator and the recommended check.")
         return "\n".join(lines)
 
     target = " and ".join(flagged) if flagged else "the deviating signals"
-    lines.append(f"Baseline board temperature is ~{BASELINE_TEMP_C:.0f} C at rest.")
+    if flagged_cols:
+        lines.append("Context: " +
+                     "; ".join(GENSET_HINTS[c] for c in flagged_cols) + ".")
+    if "temp_c" in flagged_cols:
+        lines.append(f"Baseline frame temperature is ~{BASELINE_TEMP_C:.0f} C "
+                     "with the unit on standby.")
     duration_note = f"This has persisted for {event.get('duration_s', 0):.1f}s of continuous readings"
     lead = event.get("confirm_lead_s")
     if lead:
         duration_note += f", statistically flagged {lead:.1f}s before the hard threshold was confirmed"
     lines.append(duration_note + " -- not a single momentary blip.")
     lines.append(f"Summarize the likely fault behind {target} and the "
-                 "recommended action.")
+                 "recommended maintenance action for this standby generator.")
     return "\n".join(lines)
 
 

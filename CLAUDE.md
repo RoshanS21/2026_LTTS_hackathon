@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Edge-AI predictive-maintenance demo for the LTTS hackathon, running **on the Raspberry Pi 5 itself** (this machine is the demo hardware — an "edge ECU"). Two parallel demo paths share one detection core:
+Edge-AI predictive-maintenance demo for the LTTS hackathon, running **on the Raspberry Pi 5 itself** (this machine is the demo hardware — an "edge ECU"). The demo persona is **GEN-01, a 500 kVA standby diesel generator** (hospital plant room): the J1939 simulated path plays the genset's own engine ECU feed, and the live CPX is a retrofit sensor pod on its frame. The persona constants (`ASSET_NAME`/`ASSET_DESC`/`ASSET_SITE`/`ASSET_ROLE`) live in `benchmark_edge_llm.py` — the single source both prompt layers import; don't hardcode the story elsewhere. Two parallel demo paths share one detection core:
 
 - **Live hardware path (the on-stage story, fully built & verified):** Circuit Playground Express sensor edge → USB serial → Pi (detection + LLM + `cpx_dashboard.py`) → GPIO17 LED / ESP32-C6 servo actuator. Pieces: `firmware/cpx_sensor.py` (CPX CircuitPython firmware — also flashes/tones the board on a Pi-confirmed fault), `cpx_serial_reader.py` (Pi-side reader), `cpx_detector.py` (CPX signal profile), `cpx_dashboard.py` (the live streaming dashboard, also reachable from a phone — see README "Mobile / remote live view"). See `README.md` ("Live hardware pipeline") for full detail.
 - **Simulated J1939 path (fully built, the recorded-backup fallback):** `j1939_generator.py` → synthetic CSVs → `anomaly_detector.py` → `llm_summary.py` → `dashboard.py` → `edge_actuator.py` (GPIO17 alarm). This path must keep working exactly as documented in `README.md` — it is the on-stage fallback if the hardware chain hiccups.
@@ -55,6 +55,7 @@ Dependencies come from apt (prebuilt arm64 wheels), not pip: `python3-sklearn py
 **Failure-tolerance layering is the design's spine.** Detection is the source of truth and never depends on the network or the LLM. `llm_summary.py` is the *only* layer allowed to fail live: it falls back to a deterministic templated summary on error/timeout, and unconfirmed events get an honest "monitor" note, never an invented diagnosis. `edge_actuator.py` keeps `decide()` a pure function (event → action) separate from actuation, and the GPIO backend degrades to a mock that still logs every decision — the perceive→decide→act log on the dashboard stays real even without hardware.
 
 **Honesty conventions, enforced on purpose:**
+- The GEN-01 genset persona shapes only labels and the LLM story (prompts, fallback templates, dashboard headers). Sensor values are always reported exactly as measured — never scale, offset, or rename a *value* to fit the story.
 - CPX Button A is a manual-trigger flag reported as its own column, never blended into sensor values; events it opens carry `manual_trigger` so the summary describes a manual inspection request, not a fake sensor fault.
 - `data/cpx_live_run.csv` is gitignored — only real hardware captures may be committed there, never synthetic stand-ins.
 - `data/*.csv/json` committed files are the known-good recorded-backup snapshot; they're fully reproducible (fixed seeds), so regenerate rather than hand-edit.

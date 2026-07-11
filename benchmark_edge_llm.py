@@ -59,20 +59,33 @@ DEFAULT_RUNS = 3          # measured runs (after one warm-up)
 DEFAULT_THRESHOLD = 10.0  # seconds; under this on the Pi => Option A viable
 HTTP_TIMEOUT = 600        # generous: a cold 3B model on a Pi can be slow
 
+# --- Demo persona: the monitored machine (single source for BOTH paths) ----
+# One real-world story ties the two pipelines to a single asset: GEN-01, a
+# standby diesel generator. The J1939 pipeline is the genset engine's own ECU
+# feed (real gensets speak J1939 natively -- these exact SPNs), and the CPX
+# (cpx_detector.py) is a low-cost retrofit sensor pod bolted to the same
+# unit's frame. Name/rating/site are stage context for the LLM story only;
+# sensor values themselves are always reported as-is, never invented.
+ASSET_NAME = "GEN-01"
+ASSET_DESC = "500 kVA standby diesel generator"
+ASSET_SITE = "City General Hospital basement plant room"
+ASSET_ROLE = "life-safety backup power; the unit must stay start-capable"
+
 # This mirrors the real demo: a flagged anomaly data frame in, a short
 # mechanical summary out. Keep max_tokens modest -- you only want 2 sentences,
 # and capping output keeps latency representative of the real loop.
 SYSTEM_PROMPT = (
-    "You are an on-vehicle maintenance assistant. Given a flagged sensor "
-    "anomaly, reply in exactly two lines, terse and technical, no preamble "
-    "and no extra lines. Keep each line under 15 words:\n"
+    f"You are the maintenance assistant for {ASSET_NAME}, a {ASSET_DESC} "
+    f"supplying life-safety backup power at {ASSET_SITE}. Given a flagged "
+    "sensor anomaly on this generator, reply in exactly two lines, terse and "
+    "technical, no preamble and no extra lines. Keep each line under 15 words:\n"
     "CAUSE: <one sentence stating the likely fault>\n"
     "SOLUTION: <one sentence stating the recommended action>"
 )
 
 USER_PROMPT = (
-    "Anomaly flagged on asset VEHICLE.\n"
-    "Signal frame (J1939):\n"
+    f"Anomaly flagged on {ASSET_NAME} ({ASSET_DESC}).\n"
+    "Engine ECU signal frame (J1939):\n"
     "  SPN 190 Engine Speed: 2100 rpm\n"
     "  SPN 110 Engine Coolant Temp: 104 C\n"
     "  SPN 100 Engine Oil Pressure: 38 kPa  <-- LOW for this rpm\n"
