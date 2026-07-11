@@ -75,11 +75,14 @@ CPX_LABELS = {
 # breach TEMP; resting mic RMS stays under ~200 while a clap/shout hits >1000.
 GRAVITY = 9.8
 VIBRATION_DEV_MAX = 8.0   # |accel_mag - GRAVITY| above this = abnormal motion
-TEMP_C_MAX = 33.0         # just above the ~30.5 C hand-warmth ceiling (see
-                          # the profiling note above) -- sustained firm
-                          # cupping may occasionally breach it, but a
-                          # hairdryer a few inches away is the reliable
-                          # trigger for a confirmed overheat alarm on stage
+TEMP_C_MAX = 31.0         # demo-tuned: just above the ~30.5 C ceiling that
+                          # ordinary handling reaches (measured in live runs),
+                          # so warm breath on the thermistor or ~15-30 s of
+                          # firm two-handed cupping confirms an overheat
+                          # without needing a hairdryer. CAUTION: the board
+                          # cools slowly after warming, so run the overheat
+                          # segment LAST on stage or later shake/clap events
+                          # can cross-trigger as overheat while still >31 C.
 SOUND_MAX = 1000.0        # loud acoustic event
 
 BASELINE_TEMP_C = 27.0    # typical warmed-up idle, for the prompt's context
