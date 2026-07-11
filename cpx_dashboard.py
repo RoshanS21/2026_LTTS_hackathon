@@ -35,6 +35,7 @@ import argparse
 import json
 import queue
 import statistics
+import sys
 import threading
 import time
 import webbrowser
@@ -61,6 +62,12 @@ from llm_summary import DEFAULT_MODEL, DEFAULT_TIMEOUT, summarize_event, warm_up
 app = Flask(__name__)
 
 HISTORY_LEN = 150   # sparkline points sent to the client
+
+# Persistent record of every finalized event, independent of in-memory STATE
+# (which is lost on restart and only ever hidden, never cleared, by the Clear
+# button). Non-deterministic LLM output + live-run data -- not a reproducible
+# fixed-seed snapshot, so it's gitignored like the other cpx_* live artifacts.
+HISTORY_PATH = "data/cpx_event_history.json"
 
 # The CPX summary profile: reuse cpx_detector's prompt + fallback so the LLM
 # layer describes vibration/thermal/acoustic faults, not J1939 engine faults.
@@ -102,6 +109,30 @@ def _mutate(fn):
         STATE["version"] += 1
 
 
+def _append_history(record, path=HISTORY_PATH):
+    """Append one finalized event to the on-disk history file. Called from
+    inside a _mutate() closure, so it's already covered by STATE_LOCK -- no
+    separate lock needed despite the read-modify-write.
+
+    Never allowed to raise: this runs on the single SummaryWorker thread, and
+    an uncaught exception here (disk full, permission conflict, a stray
+    non-serializable value) would kill that thread permanently -- every event
+    after it would set status="summarizing" and sit there forever, since the
+    only thread that ever flips it to "done" would be gone. History is a
+    nice-to-have; it must never be able to take down live summarization."""
+    try:
+        try:
+            with open(path) as f:
+                hist = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            hist = []
+        hist.append(record)
+        with open(path, "w") as f:
+            json.dump(hist, f, indent=2)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARNING: failed to append event history ({e})", file=sys.stderr)
+
+
 class SummaryWorker:
     """Single background LLM worker (one small model, one Pi), profile-aware so
     it can summarize CPX events. Never stalls the frame loop."""
@@ -131,12 +162,15 @@ class SummaryWorker:
             def apply(s):
                 slot = s["events"][state_idx]
                 slot.update(status="done", source=result["source"],
-                            text=result["text"], latency_s=result["latency_s"])
+                            text=result["text"], cause=result.get("cause"),
+                            solution=result.get("solution"),
+                            latency_s=result["latency_s"])
                 s["stats"]["uplink_bytes"] += uplink
                 s["stats"]["summaries_done"] += 1
                 if self.latencies:
                     s["stats"]["llm_median_s"] = round(
                         statistics.median(self.latencies), 2)
+                _append_history(dict(slot))
             _mutate(apply)
             self.queue.task_done()
 
@@ -300,7 +334,9 @@ def run_pipeline(args, actuator):
         cusum_hit = cusum.step(v)
         if_hit = bool(iforest.predict(scaler.transform(v.reshape(1, -1)))[0] == -1)
         flagged = t_hit or cusum_hit or if_hit or button
-        confirm = t_hit or button          # hard breach or manual press = confirmed
+        breaches = signal_breaches(signals)
+        vib_hit = breaches["accel_mag_ms2"]
+        instant_hit = breaches["temp_c"] or breaches["sound_level"]
         severity = float(np.max(np.abs((v - base_med) / base_mad)))
 
         if flagged:
@@ -308,7 +344,8 @@ def run_pipeline(args, actuator):
                 open_event = {
                     "start_i": i, "start_ts": frame["timestamp"],
                     "last_i": i, "last_ts": frame["timestamp"],
-                    "flag_count": 0, "confirmed": False, "manual": False,
+                    "flag_count": 0, "vib_confirm_frames": 0,
+                    "confirmed": False, "manual": False,
                     "first_confirm_i": None, "promoted": False, "state_idx": None,
                     "actuated": False, "asset_id": frame.get("asset_id"),
                     "peak": {"sev": -1.0, "signals": signals},
@@ -317,6 +354,14 @@ def run_pipeline(args, actuator):
             oe["last_i"], oe["last_ts"] = i, frame["timestamp"]
             oe["flag_count"] += 1
             oe["manual"] = oe["manual"] or button
+            if vib_hit:
+                oe["vib_confirm_frames"] += 1
+            # A single knock shouldn't alarm -- vibration only confirms once it
+            # sustains past the evidence floor. Temp/sound/button still confirm
+            # on the very first breaching frame: a hairdryer, a clap, or a
+            # deliberate press is unambiguous the instant it fires.
+            confirm = (instant_hit or button
+                       or oe["vib_confirm_frames"] >= args.min_confirm_frames)
             if confirm and oe["first_confirm_i"] is None:
                 oe["first_confirm_i"] = i
             oe["confirmed"] = oe["confirmed"] or confirm
@@ -448,7 +493,21 @@ PAGE = """
              font-size: 0.82rem; color: #cbd5e1; margin: 8px 0; }
   .signals .bad { color: #f87171; font-weight: 700; }
   .summary { font-size: 0.95rem; line-height: 1.4; margin-top: 6px; }
+  .summary.solution { color: #a7f3d0; border-left: 2px solid #10b981;
+                       padding-left: 8px; margin-top: 4px; }
   .meta { font-size: 0.72rem; color: #64748b; margin-top: 8px; }
+  #historyBtn { text-transform: none; letter-spacing: normal; font-size: 0.72rem;
+                font-weight: 600; color: #cbd5e1; background: #334155; border: none;
+                border-radius: 6px; padding: 3px 10px; cursor: pointer; margin-left: 6px; }
+  #historyBtn:hover { background: #475569; }
+  #history { display: none; margin-top: 10px; }
+  #history table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+  #history th { text-align: left; color: #64748b; font-weight: 600;
+                padding: 4px 8px; border-bottom: 1px solid #334155; }
+  #history td { padding: 6px 8px; border-bottom: 1px solid #1e293b;
+                vertical-align: top; color: #cbd5e1; }
+  #history td.cause { color: #e2e8f0; }
+  #history td.solution { color: #a7f3d0; }
   #empty { color: #64748b; font-style: italic; }
   #actions { background: #1e293b; border-radius: 10px; padding: 10px 14px;
              font-family: ui-monospace, monospace; font-size: 0.75rem;
@@ -473,8 +532,10 @@ PAGE = """
   <div class="sigs" id="sigs"></div>
 
   <h2>Detected events &rarr; edge-LLM summaries
-      <button id="clearBtn" onclick="clearFeed()">clear feed</button></h2>
+      <button id="clearBtn" onclick="clearFeed()">clear feed</button>
+      <button id="historyBtn" onclick="toggleHistory()">show history</button></h2>
   <div id="events"><div id="empty">waiting for the sensor stream...</div></div>
+  <div id="history"><div id="historyBody">loading...</div></div>
 
   <h2>Perceive &rarr; decide &rarr; act (actuator log)</h2>
   <div id="actions">no actions yet</div>
@@ -617,7 +678,9 @@ function renderEvents(d) {
       <span class="badge" style="background:${color}">${label}</span>
       <span style="font-size:.72rem;color:#94a3b8"> ${trig}${manual}</span>
       <div class="signals">${sig}</div>
-      ${r.text ? `<div class="summary">${r.text}</div>` : ''}
+      ${r.cause ? `<div class="summary"><b>Possible cause:</b> ${r.cause}</div>`
+                 : (r.text ? `<div class="summary">${r.text}</div>` : '')}
+      ${r.solution ? `<div class="summary solution"><b>Possible solution:</b> ${r.solution}</div>` : ''}
       <div class="meta">${r.event.start_ts.slice(11,19)} \\u2192 ${r.event.end_ts.slice(11,19)}
         &middot; ${r.event.duration_s}s
         ${r.event.confirm_lead_s > 0 ? '&middot; <b>flagged ' + r.event.confirm_lead_s + 's before hard breach</b>' : ''}
@@ -652,6 +715,49 @@ async function clearFeed() {
   try { await fetch('/api/clear', {method: 'POST'}); lastVersion = -1; } catch (e) {}
 }
 
+let historyOpen = false;
+function renderHistory(rows) {
+  const body = document.getElementById('historyBody');
+  if (!rows.length) { body.innerHTML = '<div id="empty">no history yet</div>'; return; }
+  const trs = [...rows].reverse().map(r => {
+    const ev = r.event || {};
+    const badge = ev.confirmed ? 'CONFIRMED' : 'monitor';
+    const manual = ev.manual_trigger ? ' [manual]' : '';
+    const sig = SIG_ORDER.map(c => {
+      const v = ev.signals && ev.signals[c];
+      return v != null ? `${SIG_LABELS[c][0]}: ${v.toFixed(1)}` : '';
+    }).join(', ');
+    return `<tr>
+      <td>${(ev.start_ts || '').slice(0, 19).replace('T', ' ')}</td>
+      <td>${badge}${manual}</td>
+      <td>${ev.duration_s ?? ''}s${ev.confirm_lead_s ? ' (lead ' + ev.confirm_lead_s + 's)' : ''}</td>
+      <td>${sig}</td>
+      <td class="cause">${r.cause || r.text || ''}</td>
+      <td class="solution">${r.solution || ''}</td>
+    </tr>`;
+  }).join('');
+  body.innerHTML = `<table><thead><tr>
+    <th>Time</th><th>Status</th><th>Duration</th><th>Signals</th>
+    <th>Possible cause</th><th>Possible solution</th>
+  </tr></thead><tbody>${trs}</tbody></table>`;
+}
+
+async function loadHistory() {
+  try {
+    const res = await fetch('/api/history');
+    renderHistory(await res.json());
+  } catch (e) {
+    document.getElementById('historyBody').textContent = 'failed to load history';
+  }
+}
+
+function toggleHistory() {
+  historyOpen = !historyOpen;
+  document.getElementById('history').style.display = historyOpen ? 'block' : 'none';
+  document.getElementById('historyBtn').textContent = historyOpen ? 'hide history' : 'show history';
+  if (historyOpen) loadHistory();
+}
+
 async function poll() {
   try {
     const res = await fetch('/api/state');
@@ -680,6 +786,19 @@ def api_state():
         resp = dict(STATE)
         resp["events"] = STATE["events"][STATE["display_offset"]:]
     return jsonify(resp)
+
+
+@app.route("/api/history")
+def api_history():
+    """Full persisted event history, independent of in-memory STATE -- survives
+    a process restart and is unaffected by the Clear button (which only hides
+    STATE["events"], never the on-disk record)."""
+    with STATE_LOCK:
+        try:
+            with open(HISTORY_PATH) as f:
+                return jsonify(json.load(f))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return jsonify([])
 
 
 @app.route("/api/clear", methods=["POST"])
@@ -714,13 +833,24 @@ def main():
     ap.add_argument("--baseline-seconds", type=float, default=8.0,
                     help="Seconds of at-rest sensor data to train the statistical models on")
     # The CPX streams ~10 Hz (vs the J1939 path's 1 Hz), so evidence is counted
-    # in frames that are 10x shorter in time -- these floors are scaled up to
-    # match: ~1.2 s of bridging and ~1.8 s of sustained statistical evidence,
-    # so one shake reads as one event and sub-second jitter is debounced rather
-    # than spawning a monitor card per twitch.
+    # in frames that are 10x shorter in time -- these floors are scaled to
+    # match: ~3 s of sustained statistical evidence (any signal) opens a
+    # MONITOR card -- kept deliberately high (see the "quiet the statistical
+    # monitor-event swarm" fix) so ambient temp/sound drift doesn't spam the
+    # feed -- while ~1.5 s of sustained vibration specifically escalates
+    # straight to a confirmed ALARM (see --min-confirm-frames), well below the
+    # MONITOR floor, so a real shake skips the monitor stage entirely rather
+    # than waiting on it. ~1.2 s of bridging keeps one continuous shake from
+    # splintering into several events. Sub-second jitter (a single knock) is
+    # debounced rather than spawning a card or firing the actuator.
     ap.add_argument("--min-unconfirmed", type=int, default=30,
                     help="Evidence floor (flagged frames, ~10 Hz => ~3 s) before a "
-                         "statistical-only event; higher = fewer monitor events")
+                         "statistical-only MONITOR event; higher = fewer monitor events")
+    ap.add_argument("--min-confirm-frames", type=int, default=15,
+                    help="Consecutive vibration-breaching frames (~10 Hz => ~1.5 s) "
+                         "required before vibration escalates to a confirmed ALARM -- "
+                         "one knock stays quiet, continuous shaking alarms. "
+                         "Temp/sound/Button A still confirm on the first breaching frame.")
     ap.add_argument("--merge-gap", type=int, default=12,
                     help="Hysteresis: clear frames (~10 Hz) tolerated inside one event")
     ap.add_argument("--max-event-seconds", type=float, default=15.0,

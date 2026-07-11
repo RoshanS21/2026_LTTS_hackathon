@@ -168,46 +168,56 @@ def infer_trigger(event):
 # template never invents a sensor fault -- it describes an operator-requested
 # inspection, matching this piece's button-trigger honesty convention.
 FALLBACK_TEMPLATES = {
-    "vibration": (
-        "Vibration magnitude of {accel_mag_ms2:.1f} m/s^2 deviates sharply "
-        "from the ~9.8 m/s^2 gravity baseline, consistent with unbalanced or "
-        "worn rotating machinery (bearing wear, imbalance, or a loose mount). "
-        "Recommend inspecting the drivetrain, bearings, and mounts before "
-        "continued operation."
-    ),
-    "overheat": (
-        "Asset temperature of {temp_c:.1f} C exceeds the safe operating limit, "
-        "consistent with overheating from cooling loss, sustained overload, or "
-        "high ambient heat. Recommend reducing load and checking the cooling "
-        "path before resuming operation."
-    ),
-    "loud_acoustic": (
-        "Acoustic level of {sound_level:.0f} (mic RMS) has spiked well above "
-        "the quiet baseline, consistent with mechanical impact, cavitation, or "
-        "a component beginning to fail. Recommend an acoustic and physical "
-        "inspection of the asset."
-    ),
-    "manual": (
-        "Operator pressed the manual inspection trigger on {asset_id}; the "
-        "vibration, temperature, and acoustic signals are within normal "
-        "bounds. Recommend a manual inspection to confirm asset condition, as "
-        "no automatic fault was detected."
-    ),
-    "unknown": (
-        "Sensor readings on {asset_id} deviate from baseline (vibration="
-        "{accel_mag_ms2:.1f} m/s^2, temp={temp_c:.1f} C, sound={sound_level:.0f}). "
-        "Recommend a manual inspection to confirm the root cause."
-    ),
+    "vibration": {
+        "cause": (
+            "Vibration magnitude of {accel_mag_ms2:.1f} m/s^2 deviates sharply "
+            "and continuously from the ~9.8 m/s^2 gravity baseline, consistent "
+            "with unbalanced or worn rotating machinery (bearing wear, "
+            "imbalance, or a loose mount)."
+        ),
+        "solution": "Recommend inspecting the drivetrain, bearings, and mounts before continued operation.",
+    },
+    "overheat": {
+        "cause": (
+            "Asset temperature of {temp_c:.1f} C exceeds the safe operating "
+            "limit, consistent with overheating from cooling loss, sustained "
+            "overload, or high ambient heat."
+        ),
+        "solution": "Recommend reducing load and checking the cooling path before resuming operation.",
+    },
+    "loud_acoustic": {
+        "cause": (
+            "Acoustic level of {sound_level:.0f} (mic RMS) has spiked well "
+            "above the quiet baseline, consistent with mechanical impact, "
+            "cavitation, or a component beginning to fail."
+        ),
+        "solution": "Recommend an acoustic and physical inspection of the asset.",
+    },
+    "manual": {
+        "cause": (
+            "Operator pressed the manual inspection trigger on {asset_id}; the "
+            "vibration, temperature, and acoustic signals are within normal bounds."
+        ),
+        "solution": "Recommend a manual inspection to confirm asset condition, as no automatic fault was detected.",
+    },
+    "unknown": {
+        "cause": (
+            "Sensor readings on {asset_id} deviate from baseline (vibration="
+            "{accel_mag_ms2:.1f} m/s^2, temp={temp_c:.1f} C, sound={sound_level:.0f})."
+        ),
+        "solution": "Recommend a manual inspection to confirm the root cause.",
+    },
 }
 
 
 def fallback_summary(event):
-    """(text, trigger) deterministic summary for an event -- the profile hook
-    llm_summary.py calls when the LLM path is unavailable."""
+    """(cause, solution, trigger) deterministic summary for an event -- the
+    profile hook llm_summary.py calls when the LLM path is unavailable."""
     trigger = infer_trigger(event)
     fields = dict(event["signals"])
     fields["asset_id"] = event["asset_id"]
-    return FALLBACK_TEMPLATES[trigger].format(**fields), trigger
+    tmpl = FALLBACK_TEMPLATES[trigger]
+    return tmpl["cause"].format(**fields), tmpl["solution"].format(**fields), trigger
 
 
 def format_anomaly_prompt(event):
@@ -247,6 +257,11 @@ def format_anomaly_prompt(event):
 
     target = " and ".join(flagged) if flagged else "the deviating signals"
     lines.append(f"Baseline board temperature is ~{BASELINE_TEMP_C:.0f} C at rest.")
+    duration_note = f"This has persisted for {event.get('duration_s', 0):.1f}s of continuous readings"
+    lead = event.get("confirm_lead_s")
+    if lead:
+        duration_note += f", statistically flagged {lead:.1f}s before the hard threshold was confirmed"
+    lines.append(duration_note + " -- not a single momentary blip.")
     lines.append(f"Summarize the likely fault behind {target} and the "
                  "recommended action.")
     return "\n".join(lines)

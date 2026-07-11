@@ -13,3 +13,8 @@ venv/
 data/cpx_live_run.csv
 data/cpx_summaries.json
 data/cpx_events.json
+
+# Live-dashboard session history: neither a fixed-seed committed snapshot nor
+# a pure real-hardware capture -- non-deterministic LLM output makes it
+# unsuitable to commit either.
+data/cpx_event_history.json

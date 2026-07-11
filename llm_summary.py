@@ -29,6 +29,7 @@ USAGE
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.request
@@ -64,45 +65,67 @@ def infer_trigger(event):
 
 
 FALLBACK_TEMPLATES = {
-    "low_oil_pressure": (
-        "Oil pressure of {spn100_oil_pressure_kpa:.0f} kPa is well below the "
-        "~340 kPa baseline for {spn190_engine_speed_rpm:.0f} rpm, consistent "
-        "with oil pump wear, low oil level, or a relief-valve fault. Recommend "
-        "immediate oil level/pump inspection before continued operation."
-    ),
-    "overheat": (
-        "Coolant temperature of {spn110_coolant_temp_c:.0f} C exceeds the safe "
-        "operating limit, consistent with a cooling-system fault (low coolant, "
-        "failing water pump, or blocked radiator). Recommend shutdown and "
-        "cooling-system inspection before resuming operation."
-    ),
-    "overspeed": (
-        "Engine speed of {spn190_engine_speed_rpm:.0f} rpm exceeds rated "
-        "redline, consistent with a governor or throttle-control fault. "
-        "Recommend immediate load reduction and governor/fuel-system inspection."
-    ),
-    "unknown": (
-        "Signal readings on {asset_id} deviate from baseline (rpm="
-        "{spn190_engine_speed_rpm:.0f}, coolant={spn110_coolant_temp_c:.0f}C, "
-        "oil={spn100_oil_pressure_kpa:.0f}kPa, oil_temp={spn175_oil_temp_c:.0f}C). "
-        "Recommend manual inspection to confirm root cause."
-    ),
+    "low_oil_pressure": {
+        "cause": (
+            "Oil pressure of {spn100_oil_pressure_kpa:.0f} kPa is well below the "
+            "~340 kPa baseline for {spn190_engine_speed_rpm:.0f} rpm, consistent "
+            "with oil pump wear, low oil level, or a relief-valve fault."
+        ),
+        "solution": "Recommend immediate oil level/pump inspection before continued operation.",
+    },
+    "overheat": {
+        "cause": (
+            "Coolant temperature of {spn110_coolant_temp_c:.0f} C exceeds the safe "
+            "operating limit, consistent with a cooling-system fault (low coolant, "
+            "failing water pump, or blocked radiator)."
+        ),
+        "solution": "Recommend shutdown and cooling-system inspection before resuming operation.",
+    },
+    "overspeed": {
+        "cause": (
+            "Engine speed of {spn190_engine_speed_rpm:.0f} rpm exceeds rated "
+            "redline, consistent with a governor or throttle-control fault."
+        ),
+        "solution": "Recommend immediate load reduction and governor/fuel-system inspection.",
+    },
+    "unknown": {
+        "cause": (
+            "Signal readings on {asset_id} deviate from baseline (rpm="
+            "{spn190_engine_speed_rpm:.0f}, coolant={spn110_coolant_temp_c:.0f}C, "
+            "oil={spn100_oil_pressure_kpa:.0f}kPa, oil_temp={spn175_oil_temp_c:.0f}C)."
+        ),
+        "solution": "Recommend manual inspection to confirm root cause.",
+    },
 }
 
 
 MONITOR_NOTE = (
     "Statistical anomaly detector flagged an unusual sensor pattern on "
-    "{asset_id}, but no hard safety threshold was breached. Likely sensor "
-    "noise or a borderline reading -- no confirmed fault, recommend routine "
-    "monitoring rather than immediate action."
+    "{asset_id} for about {duration_s:.1f}s, but no hard safety threshold was "
+    "breached. Likely sensor noise or a borderline/brief reading -- no "
+    "confirmed fault, recommend routine monitoring rather than immediate action."
 )
 
 
 def fallback_summary(event):
+    """(cause, solution, trigger) deterministic summary for an event -- the
+    profile hook llm_summary.py calls when the LLM path is unavailable."""
     trigger = infer_trigger(event)
     fields = dict(event["signals"])
     fields["asset_id"] = event["asset_id"]
-    return FALLBACK_TEMPLATES[trigger].format(**fields), trigger
+    tmpl = FALLBACK_TEMPLATES[trigger]
+    return tmpl["cause"].format(**fields), tmpl["solution"].format(**fields), trigger
+
+
+def parse_cause_solution(text):
+    """Split a 'CAUSE: ...\\nSOLUTION: ...' LLM reply into two fields. Falls
+    back to treating the whole reply as the cause (no solution) if the model
+    didn't follow the format, rather than dropping the response."""
+    m_cause = re.search(r'CAUSE:\s*(.+?)(?:\n|$)', text, re.IGNORECASE)
+    m_sol = re.search(r'SOLUTION:\s*(.+)', text, re.IGNORECASE | re.DOTALL)
+    if m_cause and m_sol:
+        return m_cause.group(1).strip(), m_sol.group(1).strip()
+    return text.strip(), None
 
 
 def call_llm(host, model, prompt, timeout):
@@ -148,9 +171,11 @@ def summarize_event(host, model, event, timeout, profile=None):
     if not event.get("confirmed", True):
         # Statistical-only flag, no hard threshold breached anywhere in the
         # window -- don't let the LLM improvise a confident diagnosis for
-        # likely noise. (Profile-agnostic: only asset_id is interpolated.)
-        text = MONITOR_NOTE.format(asset_id=event["asset_id"])
-        return {"source": "monitor", "model": None, "text": text, "latency_s": 0.0}
+        # likely noise. (Profile-agnostic: only asset_id/duration_s interpolated.)
+        text = MONITOR_NOTE.format(asset_id=event["asset_id"],
+                                    duration_s=event.get("duration_s", 0))
+        return {"source": "monitor", "model": None, "text": text,
+                "cause": text, "solution": None, "latency_s": 0.0}
 
     prompt = prompt_fn(event)
     t0 = time.monotonic()
@@ -160,13 +185,18 @@ def summarize_event(host, model, event, timeout, profile=None):
         text = (resp.get("response") or "").strip()
         if not text:
             raise ValueError("empty response")
-        return {"source": "llm", "model": model, "text": text, "latency_s": elapsed}
+        cause, solution = parse_cause_solution(text)
+        combined = f"{cause} {solution}" if solution else cause
+        return {"source": "llm", "model": model, "text": combined,
+                "cause": cause, "solution": solution, "latency_s": elapsed}
     except Exception as e:  # noqa: BLE001
         elapsed = time.monotonic() - t0
-        text, trigger = fallback_fn(event)
+        cause, solution, trigger = fallback_fn(event)
+        combined = f"{cause} {solution}"
         print(f"    LLM call failed/too slow after {elapsed:.1f}s ({e}) "
               f"-- using '{trigger}' fallback template", file=sys.stderr)
-        return {"source": "fallback", "model": None, "text": text, "latency_s": elapsed}
+        return {"source": "fallback", "model": None, "text": combined,
+                "cause": cause, "solution": solution, "latency_s": elapsed}
 
 
 def detect_events(csv_path):
