@@ -62,6 +62,78 @@ arduino-cli upload  --fqbn esp32:esp32:esp32c6 -p /dev/ttyACM1 firmware/esp32c6_
 #   `ls /dev/ttyACM*` before/after plugging the C6 to identify it.
 ```
 
+### macOS bring-up recipe (VERIFIED 2026-07-10, C6-DevKitC-1)
+
+The whole toolchain was reproduced on a Mac and used to flash a spare C6. The
+gotchas below cost real time, so they're written down:
+
+```bash
+brew install arduino-cli
+arduino-cli config init
+arduino-cli config add board_manager.additional_urls \
+  https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+arduino-cli core update-index
+arduino-cli core install esp32:esp32          # large (~1 GB, RISC-V toolchain)
+arduino-cli lib install ESP32Servo
+
+# Flash over the C6's NATIVE USB port (the port labelled "USB", not "UART"):
+arduino-cli compile --fqbn "esp32:esp32:esp32c6:CDCOnBoot=cdc" firmware/esp32c6_actuator
+arduino-cli upload  --fqbn "esp32:esp32:esp32c6:CDCOnBoot=cdc" \
+  -p /dev/cu.usbmodem1101 firmware/esp32c6_actuator
+```
+
+- **`CDCOnBoot=cdc` matters.** It maps the firmware's `Serial` to whichever USB
+  interface you're connected through. Flash/talk over the **native USB** port →
+  `CDCOnBoot=cdc` (`Serial` = native USB CDC, `/dev/cu.usbmodem*`, Espressif VID
+  `0x303A`). Flash/talk over the **UART/CP2102N** port instead →
+  `CDCOnBoot=default` (`Serial` = UART0, `/dev/cu.usbserial*`, SiLabs VID
+  `0x10C4`). Mismatch it and the board flashes fine but goes silent.
+- **"Red LED on but no serial port" = charge-only cable** (or the dock/hub).
+  The DevKitC-1's CP2102N enumerates on its own the instant a *data* cable is in
+  the UART port, independent of firmware — if nothing appears, it's the cable or
+  the port, not the board. Plug **directly into the machine**, use a known-data
+  cable. Confirmed on macOS with: `ioreg -p IOUSB -l -w 0 | grep -iE '303A|10C4'`.
+- **The native `USB` port can be flaky** where the `UART` port is fine (or vice
+  versa) — one dead C6 in this project would present on neither, a spare
+  presented on native USB only. If one port won't enumerate, try the other.
+- **UART-port flashing needs manual download mode** if auto-reset fails
+  (esptool: "No serial data received"): hold **BOOT**, tap **RST**, release
+  BOOT, then upload. Native-USB flashing resets itself and doesn't need this.
+
+## Troubleshooting: servo powered → board hangs / USB goes silent
+
+Symptom: the C6 answers `PING`→`PONG` perfectly with the servo **unpowered**,
+but the moment the servo has power the USB serial stops responding (the port
+stays enumerated — `/dev/cu.usbmodem*` present — but no bytes flow). A power
+cycle is required to recover; just unplugging the servo does **not** un-hang a
+already-hung C6. Bisected on 2026-07-10 to: **healthy board, correct firmware,
+correct pins (signal=GPIO2, GND=G), signal path fine — the trigger is purely
+the _powered_ servo.**
+
+Cause (bisected 2026-07-10): the hang was reproduced every time by **hot-plugging
+the servo onto an already-running C6** — the connect-transient (inrush as the
+servo's cap charges / the horn snaps to position, coupling through the shared
+ground) crashes the C6's USB. Disconnecting the servo afterward does *not*
+recover it; only a power cycle does. It is **not** a wrong-pin problem — moving
+`SERVO_PIN` does not help — and it is **not** the signal or ground wire alone
+(the board `PING`s fine with signal on GPIO2 + GND connected as long as the
+servo is unpowered).
+
+**Resolution (VERIFIED working, servo physically sweeping):** wire everything
+first — signal→GPIO2, common ground, servo V+→external 5V — and *then* power the
+C6 (fresh boot / power cycle). Booting with the whole rig already connected is
+stable; hot-plugging the servo onto a live board is what breaks it.
+
+Extra margin (reduces the transient, recommended but not strictly required once
+the boot order is right):
+1. **470–1000 µF electrolytic cap across the servo's V+/GND**, near the servo.
+2. **Star-ground at the supply:** servo GND wire goes *directly* to the external
+   supply's (−) terminal; a *separate* wire taps that same (−) to the C6 `G`.
+   Never route the servo's return current *through* the C6 (`servo GND → C6 →
+   supply` is the failure topology).
+3. **Stiffer 5V supply** (≥1–2 A), short/thick wires, tight connections — loose
+   breadboard jumpers add resistance and worsen any bounce.
+
 ## Serial protocol (Pi → C6, newline-terminated)
 
 | Command | Effect | Ack |
