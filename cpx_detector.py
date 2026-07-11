@@ -65,7 +65,7 @@ CPX_LABELS = {
 # breach TEMP; resting mic RMS stays under ~200 while a clap/shout hits >1000.
 GRAVITY = 9.8
 VIBRATION_DEV_MAX = 8.0   # |accel_mag - GRAVITY| above this = abnormal motion
-TEMP_C_MAX = 32.0         # just above the ~30.5 C hand-warmth ceiling (see
+TEMP_C_MAX = 33.0         # just above the ~30.5 C hand-warmth ceiling (see
                           # the profiling note above) -- sustained firm
                           # cupping may occasionally breach it, but a
                           # hairdryer a few inches away is the reliable

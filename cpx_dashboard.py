@@ -739,7 +739,7 @@ const STATUS_COLORS = {starting:'#475569', connecting:'#475569', baseline:'#0891
 // [label, unit, bound, kind]; vibration bound is the upper gravity+dev line.
 const SIG_LABELS = {
   accel_mag_ms2: ['Vibration |accel|', 'm/s\\u00b2', 17.8, 'over'],
-  temp_c: ['Temperature', '\\u00b0C', 32, 'over'],
+  temp_c: ['Temperature', '\\u00b0C', 33, 'over'],
   sound_level: ['Acoustic (mic RMS)', '', 1000, 'over'],
 };
 const SIG_ORDER = Object.keys(SIG_LABELS);
