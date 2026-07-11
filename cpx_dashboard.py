@@ -53,7 +53,7 @@ from anomaly_detector import CusumDetector, cusum_baseline
 from benchmark_edge_llm import DEFAULT_HOST
 from cpx_detector import (
     CPX_LABELS, FEATURE_COLUMNS, GRAVITY, SOUND_MAX, TEMP_C_MAX,
-    VIBRATION_DEV_MAX, infer_trigger,
+    VIBRATION_DEV_MAX,
 )
 from esp32_actuator import ServoActuator
 from edge_actuator import ALARM_PIN, Actuator
@@ -77,7 +77,7 @@ CPX_PROFILE = SimpleNamespace(
 )
 
 STATE = {
-    "status": "starting",  # starting | connecting | baseline | warming | streaming | error
+    "status": "starting",  # starting | connecting | baseline | warming | streaming | reconnecting | error
     "asset_id": None,
     "frames": 0,
     "mode": None,          # "live" | "mock"
@@ -91,6 +91,20 @@ STATE = {
     "version": 0,
 }
 STATE_LOCK = threading.Lock()
+
+# Independent fault channels: a shake and a temperature rise are physically
+# unrelated, so each gets its own tracker rather than being folded into
+# whichever anomaly happened to open first. This is what lets a second,
+# distinct fault surface as its own card while an earlier one is still open,
+# instead of silently extending/overwriting it. CHANNEL_FEATURE maps a
+# sensor channel to the feature column whose deviation represents it;
+# "manual" (Button A) has no feature column -- it's its own signal source.
+CHANNELS = ("vibration", "overheat", "loud_acoustic", "manual")
+CHANNEL_FEATURE = {
+    "vibration": "accel_mag_ms2",
+    "overheat": "temp_c",
+    "loud_acoustic": "sound_level",
+}
 
 
 def signal_breaches(signals):
@@ -170,7 +184,12 @@ class SummaryWorker:
                 if self.latencies:
                     s["stats"]["llm_median_s"] = round(
                         statistics.median(self.latencies), 2)
-                _append_history(dict(slot))
+                # History is a record of real, diagnosed faults -- not every
+                # statistical blip. Only confirmed events that got an actual
+                # solution (llm or fallback; a monitor note never has one)
+                # get persisted.
+                if slot["event"].get("confirmed") and slot.get("solution"):
+                    _append_history(dict(slot))
             _mutate(apply)
             self.queue.task_done()
 
@@ -190,17 +209,79 @@ def frame_source(args, ctx):
                 yield len(line) + 1, frame
     else:
         _mutate(lambda s: s.update(mode="live"))
-        port = args.port or cpx_serial_reader.find_cpx_port()
-        if port is None:
-            raise RuntimeError("no CPX serial port found (plug it in, pass --port, "
-                               "or use --mock)")
-        ser = cpx_serial_reader.open_serial(port)
-        ctx.ser = ser
-        print(f"CPX connected on {port}", flush=True)
-        for raw in ser:
-            frame = cpx_serial_reader.parse_line(raw.decode("utf-8", "replace"))
-            if frame is not None:
-                yield len(raw), frame
+        # Reconnect loop: a serial read can fail on a transient USB/CDC
+        # hiccup with the CPX never actually leaving the bus (confirmed via
+        # dmesg -- no re-enumeration event), so this is NOT necessarily a
+        # real disconnect. Without a retry here, that one hiccup would kill
+        # the whole pipeline thread permanently and freeze the dashboard on
+        # stale data forever (a demo actually hit exactly this). Retrying
+        # is safe: detection has no persistent state that a fresh reconnect
+        # would corrupt -- events forming at the moment of the drop are
+        # simply lost, same as if a few frames were dropped mid-run.
+        #
+        # Three footguns this has to dodge, all learned the hard way:
+        #  1. `for raw in ser:` uses Python's default iterator protocol,
+        #     which calls readline() and treats an EMPTY return as
+        #     end-of-stream -- but pyserial also returns b'' on a plain
+        #     read TIMEOUT (no data yet, nothing wrong). That silently
+        #     ended the loop -- no exception, no log line -- on any quiet
+        #     gap over ~1s, triggering a reconnect for no real reason.
+        #     Fixed by calling ser.readline() explicitly and treating an
+        #     empty read as "keep waiting", not "disconnected".
+        #  2. The previous serial handle was never closed before reopening,
+        #     so the fresh connection immediately collided with the still-
+        #     open old one and failed again right away -- a permanent
+        #     back-to-back reconnect loop that never stabilized. Fixed by
+        #     closing the old handle in the except block before retrying.
+        #  3. pyserial's own "device reports readiness to read but returned
+        #     no data" exception can fire on a perfectly healthy connection
+        #     -- confirmed via dmesg showing zero USB re-enumeration events
+        #     across many of these -- most likely a benign CDC zero-length-
+        #     packet artifact, not a real fault. Tearing down and reopening
+        #     the port on every one of these (the original fix) caused a
+        #     visible "reconnecting" flicker for no real problem. Fixed by
+        #     retrying the read in place first; only a genuine STREAK of
+        #     consecutive failures escalates to a full, visible reconnect.
+        CONSECUTIVE_ERROR_LIMIT = 8
+        while True:
+            port = args.port or cpx_serial_reader.find_cpx_port()
+            if port is None:
+                _mutate(lambda s: s.update(status="reconnecting"))
+                time.sleep(1.5)
+                continue
+            ser = None
+            try:
+                ser = cpx_serial_reader.open_serial(port)
+                ctx.ser = ser
+                print(f"CPX connected on {port}", flush=True)
+                consecutive_errors = 0
+                while True:
+                    try:
+                        raw = ser.readline()
+                    except Exception as read_err:  # noqa: BLE001 -- see footgun 3
+                        consecutive_errors += 1
+                        if consecutive_errors >= CONSECUTIVE_ERROR_LIMIT:
+                            raise
+                        time.sleep(0.05)
+                        continue
+                    if not raw:
+                        continue  # read timeout -- no data yet, not a disconnect
+                    consecutive_errors = 0
+                    frame = cpx_serial_reader.parse_line(raw.decode("utf-8", "replace"))
+                    if frame is not None:
+                        if STATE["status"] == "reconnecting":
+                            _mutate(lambda s: s.update(status="streaming"))
+                        yield len(raw), frame
+            except Exception as e:  # noqa: BLE001 -- serial hiccup: reconnect, don't crash
+                if ser is not None:
+                    try:
+                        ser.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                ctx.ser = None
+                print(f"CPX serial error: {e} -- reconnecting in 1.5s", flush=True)
+                _mutate(lambda s: s.update(status="reconnecting"))
+                time.sleep(1.5)
 
 
 def feat_vec(frame):
@@ -283,29 +364,36 @@ def run_pipeline(args, actuator):
     _mutate(lambda s: s.update(status="streaming"))
 
     max_event_frames = int(args.max_event_seconds * 10)  # bound on one event
-    open_event = None
+    # One tracker per fault channel, all live at once -- a shake in progress
+    # doesn't swallow an overheat that starts a second later; each gets its
+    # own card. See the CHANNELS comment above for why they're independent.
+    open_events = {ch: None for ch in CHANNELS}
 
-    def close_event():
-        peak = open_event["peak"]
-        confirmed = open_event["confirmed"]
-        lead_frames = (open_event["first_confirm_i"] - open_event["start_i"]
-                       if confirmed and open_event["first_confirm_i"] is not None
+    def any_other_confirmed_open(exclude):
+        return any(o is not None and o is not exclude and o["confirmed"] and o["promoted"]
+                   for o in open_events.values())
+
+    def close_event(oe):
+        peak = oe["peak"]
+        confirmed = oe["confirmed"]
+        lead_frames = (oe["first_confirm_i"] - oe["start_i"]
+                       if confirmed and oe["first_confirm_i"] is not None
                        else None)
         event = {
-            "start_ts": open_event["start_ts"],
-            "end_ts": open_event["last_ts"],
-            "asset_id": open_event["asset_id"],
-            "duration_s": round((datetime.fromisoformat(open_event["last_ts"])
-                                 - datetime.fromisoformat(open_event["start_ts"])
+            "start_ts": oe["start_ts"],
+            "end_ts": oe["last_ts"],
+            "asset_id": oe["asset_id"],
+            "duration_s": round((datetime.fromisoformat(oe["last_ts"])
+                                 - datetime.fromisoformat(oe["start_ts"])
                                  ).total_seconds(), 1),
             "confirmed": confirmed,
-            "manual_trigger": open_event["manual"],
+            "manual_trigger": oe["manual"],
             "confirm_lead_s": (round(lead_frames / 10.0, 1)
                                if lead_frames else None),
             "signals": peak["signals"],
+            "trigger": oe["channel"],
         }
-        event["trigger"] = infer_trigger(event)
-        idx = open_event["state_idx"]
+        idx = oe["state_idx"]
 
         def apply(s):
             slot = s["events"][idx]
@@ -320,48 +408,41 @@ def run_pipeline(args, actuator):
                     s["stats"]["monitor_events"] += 1
         _mutate(apply)
         worker.submit(idx, event)
-        actuator.alarm_off()
+        # Two simultaneous faults share one physical actuator -- only release
+        # it once nothing else confirmed is still open, or closing this one
+        # would silence an alarm for a fault that's still ongoing.
+        if not any_other_confirmed_open(oe):
+            actuator.alarm_off()
 
-    i = n_baseline
-    for byte_len, frame in src:
-        if args.duration and i >= n_baseline + int(args.duration * 10):
-            break
-        signals, button = push_live(frame, byte_len)
-        v = feat_vec(frame)
-
-        # --- live per-frame detection (the real edge inference step) ---
-        t_hit = bool(cpx_detector.threshold_flags_cpx(v.reshape(1, -1))[0])
-        cusum_hit = cusum.step(v)
-        if_hit = bool(iforest.predict(scaler.transform(v.reshape(1, -1)))[0] == -1)
-        flagged = t_hit or cusum_hit or if_hit or button
-        breaches = signal_breaches(signals)
-        vib_hit = breaches["accel_mag_ms2"]
-        instant_hit = breaches["temp_c"] or breaches["sound_level"]
-        severity = float(np.max(np.abs((v - base_med) / base_mad)))
-
-        if flagged:
-            if open_event is None:
-                open_event = {
+    def handle_channel(ch, active_now, confirm_now, severity, i, frame, signals, button):
+        oe = open_events[ch]
+        if active_now:
+            if oe is None:
+                oe = open_events[ch] = {
                     "start_i": i, "start_ts": frame["timestamp"],
                     "last_i": i, "last_ts": frame["timestamp"],
                     "flag_count": 0, "vib_confirm_frames": 0,
-                    "confirmed": False, "manual": False,
+                    "confirmed": False, "manual": ch == "manual",
                     "first_confirm_i": None, "promoted": False, "state_idx": None,
                     "actuated": False, "asset_id": frame.get("asset_id"),
-                    "peak": {"sev": -1.0, "signals": signals},
+                    "peak": {"sev": -1.0, "signals": signals}, "channel": ch,
                 }
-            oe = open_event
             oe["last_i"], oe["last_ts"] = i, frame["timestamp"]
             oe["flag_count"] += 1
-            oe["manual"] = oe["manual"] or button
-            if vib_hit:
-                oe["vib_confirm_frames"] += 1
-            # A single knock shouldn't alarm -- vibration only confirms once it
-            # sustains past the evidence floor. Temp/sound/button still confirm
-            # on the very first breaching frame: a hairdryer, a clap, or a
-            # deliberate press is unambiguous the instant it fires.
-            confirm = (instant_hit or button
-                       or oe["vib_confirm_frames"] >= args.min_confirm_frames)
+            if ch == "vibration":
+                # vib_confirm_frames only counts genuine hard-bound breaches
+                # (confirm_now), never frames where vibration merely won the
+                # dominant-channel attribution for a statistical flag -- a
+                # single knock shouldn't alarm, but neither should ambient
+                # statistical noise that never actually crossed the bound.
+                if confirm_now:
+                    oe["vib_confirm_frames"] += 1
+                confirm = oe["vib_confirm_frames"] >= args.min_confirm_frames
+            else:
+                # Overheat/loud/manual confirm on the first breaching frame:
+                # a hairdryer, a clap, or a deliberate press is unambiguous
+                # the instant it fires.
+                confirm = confirm_now
             if confirm and oe["first_confirm_i"] is None:
                 oe["first_confirm_i"] = i
             oe["confirmed"] = oe["confirmed"] or confirm
@@ -370,8 +451,9 @@ def run_pipeline(args, actuator):
 
             # Confirmed events (hard breach / Button A) always promote.
             # Statistical-only runs promote to a "monitor" event only if they
-            # sustain past the evidence floor -- unless --confirmed-only, which
-            # suppresses monitor cards entirely for a hard-fault-only feed.
+            # sustain past the evidence floor -- unless --confirmed-only,
+            # which suppresses monitor cards entirely for a hard-fault-only
+            # feed (the default).
             statistical_ok = (not args.confirmed_only
                               and oe["flag_count"] >= args.min_unconfirmed)
             if not oe["promoted"] and (oe["confirmed"] or statistical_ok):
@@ -383,8 +465,8 @@ def run_pipeline(args, actuator):
                     "duration_s": round((i - oe["start_i"]) / 10.0, 1),
                     "confirmed": oe["confirmed"], "manual_trigger": oe["manual"],
                     "confirm_lead_s": None, "signals": oe["peak"]["signals"],
+                    "trigger": ch,
                 }
-                snap["trigger"] = infer_trigger(snap)
 
                 def open_card(s):
                     s["events"].append({
@@ -393,7 +475,7 @@ def run_pipeline(args, actuator):
                         "latency_s": None,
                     })
                 _mutate(open_card)
-                actuator.handle_event(snap, trigger=snap["trigger"])
+                actuator.handle_event(snap, trigger=ch)
                 if oe["confirmed"]:
                     flash_cpx_led()
                 oe["actuated"] = oe["confirmed"]
@@ -407,7 +489,7 @@ def run_pipeline(args, actuator):
                     ev["confirm_lead_s"] = lead
                 _mutate(upgrade)
                 actuator.handle_event({"confirmed": True, "asset_id": oe["asset_id"]},
-                                      trigger="sensor")
+                                      trigger=ch)
                 flash_cpx_led()
                 oe["actuated"] = True
 
@@ -425,19 +507,65 @@ def run_pipeline(args, actuator):
                 # gap, so an event would never close. Bound it: close + summarize
                 # + release the actuator, then let it re-open if still flagging.
                 if (i - oe["start_i"]) >= max_event_frames:
-                    close_event()
-                    open_event = None
-        elif open_event is not None and (i - open_event["last_i"] > args.merge_gap):
-            if open_event["promoted"]:
-                close_event()
+                    close_event(oe)
+                    open_events[ch] = None
+        elif oe is not None and (i - oe["last_i"] > args.merge_gap):
+            if oe["promoted"]:
+                close_event(oe)
             else:
                 _mutate(lambda s: s["stats"].__setitem__(
                     "debounced", s["stats"]["debounced"] + 1))
-            open_event = None
+            open_events[ch] = None
+
+    i = n_baseline
+    for byte_len, frame in src:
+        if args.duration and i >= n_baseline + int(args.duration * 10):
+            break
+        signals, button = push_live(frame, byte_len)
+        v = feat_vec(frame)
+
+        # --- live per-frame detection (the real edge inference step) ---
+        cusum_hit = cusum.step(v)
+        if_hit = bool(iforest.predict(scaler.transform(v.reshape(1, -1)))[0] == -1)
+        breaches = signal_breaches(signals)
+        z = np.abs((v - base_med) / base_mad)
+        z_by_col = dict(zip(FEATURE_COLUMNS, z))
+        severity_by_channel = {ch: float(z_by_col[col])
+                               for ch, col in CHANNEL_FEATURE.items()}
+
+        # A purely-statistical (no hard-bound breach) flag from CUSUM/IF is a
+        # single joint score over all 3 signals, not per-channel -- attribute
+        # it to whichever channel deviates most this frame, so ambient drift
+        # on one signal doesn't get misread as a different channel's anomaly.
+        stat_hit = cusum_hit or if_hit
+        dominant = max(CHANNEL_FEATURE, key=lambda ch: severity_by_channel[ch])
+
+        active = {
+            "vibration": breaches["accel_mag_ms2"] or (stat_hit and dominant == "vibration"),
+            "overheat": breaches["temp_c"] or (stat_hit and dominant == "overheat"),
+            "loud_acoustic": breaches["sound_level"] or (stat_hit and dominant == "loud_acoustic"),
+            "manual": button,
+        }
+        confirm_now = {
+            # For vibration this is the genuine hard-breach flag (not the
+            # broader "active" flag, which can also be true from mere
+            # statistical dominance) -- handle_channel only advances the
+            # sustain counter on real breaches.
+            "vibration": breaches["accel_mag_ms2"],
+            "overheat": breaches["temp_c"],
+            "loud_acoustic": breaches["sound_level"],
+            "manual": button,
+        }
+        severity_by_channel["manual"] = float(np.max(z))
+
+        for ch in CHANNELS:
+            handle_channel(ch, active[ch], confirm_now[ch], severity_by_channel[ch],
+                           i, frame, signals, button)
         i += 1
 
-    if open_event is not None and open_event["promoted"]:
-        close_event()
+    for oe in open_events.values():
+        if oe is not None and oe["promoted"]:
+            close_event(oe)
     worker.queue.join()
     _mutate(lambda s: s.update(status="done"))
 
@@ -486,10 +614,12 @@ PAGE = """
   .sig canvas { width: 100%; height: 44px; display: block; }
   .card { background: #1e293b; border-radius: 10px; padding: 14px 16px;
           margin-bottom: 12px; border-left: 4px solid #334155; }
-  .card.active { border-left-color: #dc2626; animation: pulse 1.2s infinite; }
+  .card.active { animation: pulse 1.2s infinite; }
   .badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
            font-size: 0.72rem; font-weight: 600; color: white; margin-bottom: 8px; }
-  .signals { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px;
+  /* Single column, one row per sensor in SIG_ORDER, so vibration/temp/sound
+     always land in the same order top-to-bottom across every card. */
+  .signals { display: grid; grid-template-columns: 1fr; gap: 4px;
              font-size: 0.82rem; color: #cbd5e1; margin: 8px 0; }
   .signals .bad { color: #f87171; font-weight: 700; }
   .summary { font-size: 0.95rem; line-height: 1.4; margin-top: 6px; }
@@ -500,15 +630,33 @@ PAGE = """
                 font-weight: 600; color: #cbd5e1; background: #334155; border: none;
                 border-radius: 6px; padding: 3px 10px; cursor: pointer; margin-left: 6px; }
   #historyBtn:hover { background: #475569; }
-  #history { display: none; margin-top: 10px; }
-  #history table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
-  #history th { text-align: left; color: #64748b; font-weight: 600;
-                padding: 4px 8px; border-bottom: 1px solid #334155; }
-  #history td { padding: 6px 8px; border-bottom: 1px solid #1e293b;
-                vertical-align: top; color: #cbd5e1; }
-  #history td.cause { color: #e2e8f0; }
-  #history td.solution { color: #a7f3d0; }
   #empty { color: #64748b; font-style: italic; }
+  /* History as a full-screen overlay dialog, not an inline section -- it has
+     its own scroll region so opening it never makes the main page scroll. */
+  #historyOverlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+                    z-index: 1000; align-items: center; justify-content: center; padding: 20px; }
+  #historyOverlay.open { display: flex; }
+  #historyDialog { background: #1e293b; border-radius: 12px; width: min(1100px, 100%);
+                   max-height: 88vh; display: flex; flex-direction: column;
+                   box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+  #historyHeader { display: flex; align-items: center; justify-content: space-between;
+                   padding: 14px 18px; border-bottom: 1px solid #334155; flex: none; }
+  #historyHeader h3 { margin: 0; font-size: 1rem; }
+  #historyHeader .btns { display: flex; gap: 8px; }
+  #historyClearBtn, #historyCloseBtn { font-size: 0.72rem; font-weight: 600; color: #cbd5e1;
+                background: #334155; border: none; border-radius: 6px; padding: 5px 12px;
+                cursor: pointer; }
+  #historyClearBtn:hover, #historyCloseBtn:hover { background: #475569; }
+  #historyClearBtn { color: #fca5a5; }
+  #historyBody { padding: 14px 18px; overflow-y: auto; }
+  #historyBody table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+  #historyBody th { text-align: left; color: #64748b; font-weight: 600;
+                padding: 4px 8px; border-bottom: 1px solid #334155;
+                position: sticky; top: 0; background: #1e293b; }
+  #historyBody td { padding: 6px 8px; border-bottom: 1px solid #0f172a;
+                vertical-align: top; color: #cbd5e1; }
+  #historyBody td.cause { color: #e2e8f0; }
+  #historyBody td.solution { color: #a7f3d0; }
   #actions { background: #1e293b; border-radius: 10px; padding: 10px 14px;
              font-family: ui-monospace, monospace; font-size: 0.75rem;
              color: #cbd5e1; max-height: 160px; overflow-y: auto; }
@@ -533,12 +681,24 @@ PAGE = """
 
   <h2>Detected events &rarr; edge-LLM summaries
       <button id="clearBtn" onclick="clearFeed()">clear feed</button>
-      <button id="historyBtn" onclick="toggleHistory()">show history</button></h2>
+      <button id="historyBtn" onclick="openHistory()">history</button></h2>
   <div id="events"><div id="empty">waiting for the sensor stream...</div></div>
-  <div id="history"><div id="historyBody">loading...</div></div>
 
   <h2>Perceive &rarr; decide &rarr; act (actuator log)</h2>
   <div id="actions">no actions yet</div>
+
+  <div id="historyOverlay" onclick="if (event.target === this) closeHistory()">
+    <div id="historyDialog">
+      <div id="historyHeader">
+        <h3>Event history &mdash; diagnosed faults</h3>
+        <div class="btns">
+          <button id="historyClearBtn" onclick="clearHistory()">clear history</button>
+          <button id="historyCloseBtn" onclick="closeHistory()">close</button>
+        </div>
+      </div>
+      <div id="historyBody">loading...</div>
+    </div>
+  </div>
 
 <script>
 let lastVersion = -1;
@@ -573,14 +733,25 @@ function fireFaultAlert() {
 }
 
 const STATUS_COLORS = {starting:'#475569', connecting:'#475569', baseline:'#0891b2',
-                       warming:'#7c3aed', streaming:'#2563eb', done:'#16a34a', error:'#dc2626'};
+                       warming:'#7c3aed', streaming:'#2563eb', reconnecting:'#d97706',
+                       done:'#16a34a', error:'#dc2626'};
 // [label, unit, bound, kind]; vibration bound is the upper gravity+dev line.
 const SIG_LABELS = {
   accel_mag_ms2: ['Vibration |accel|', 'm/s\\u00b2', 17.8, 'over'],
-  temp_c: ['Temperature', '\\u00b0C', 31, 'over'],
+  temp_c: ['Temperature', '\\u00b0C', 34, 'over'],
   sound_level: ['Acoustic (mic RMS)', '', 1000, 'over'],
 };
 const SIG_ORDER = Object.keys(SIG_LABELS);
+// Color the diagnosis by WHICH fault it is, consistent everywhere it shows
+// up (live feed card, badge, history table) -- not by its summarization
+// status, so a glance at the color tells you the fault type.
+const TRIGGER_COLORS = {
+  vibration: '#f97316',      // orange
+  overheat: '#ef4444',       // red
+  loud_acoustic: '#a855f7',  // purple
+  manual: '#8b5cf6',         // violet
+  unknown: '#64748b',        // gray
+};
 
 function fmtBytes(b) {
   if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
@@ -659,14 +830,15 @@ function renderEvents(d) {
     container.innerHTML = '<div id="empty">no anomalies yet \\u2014 shake, warm, or press Button A</div>';
     return;
   }
-  const labelMap = {llm: ['AI Diagnosis', '#2563eb'], fallback: ['Template (offline)', '#d97706'],
-                    monitor: ['Monitoring \\u2013 no confirmed fault', '#6b7280']};
+  const labelMap = {llm: 'AI Diagnosis', fallback: 'Template (offline)',
+                    monitor: 'Monitoring \\u2013 no confirmed fault'};
   let html = '';
   for (const r of [...d.events].reverse()) {
-    let label, color, extraCls = '';
-    if (r.status === 'active') { [label, color] = ['Anomaly in progress', '#dc2626']; extraCls = ' active'; }
-    else if (r.status === 'summarizing') { [label, color] = ['Summarizing on-device\\u2026', '#7c3aed']; }
-    else { [label, color] = labelMap[r.source] || [r.source, '#334155']; }
+    let label, extraCls = '';
+    if (r.status === 'active') { label = 'Anomaly in progress'; extraCls = ' active'; }
+    else if (r.status === 'summarizing') { label = 'Summarizing on-device\\u2026'; }
+    else { label = labelMap[r.source] || r.source; }
+    const color = TRIGGER_COLORS[r.event.trigger] || '#334155';
     const trig = r.event.trigger ? r.event.trigger.replace('_', ' ') : '';
     const manual = r.event.manual_trigger ? ' <span style="color:#a78bfa">[manual]</span>' : '';
     const sig = SIG_ORDER.map(c => {
@@ -715,29 +887,29 @@ async function clearFeed() {
   try { await fetch('/api/clear', {method: 'POST'}); lastVersion = -1; } catch (e) {}
 }
 
-let historyOpen = false;
 function renderHistory(rows) {
   const body = document.getElementById('historyBody');
-  if (!rows.length) { body.innerHTML = '<div id="empty">no history yet</div>'; return; }
+  if (!rows.length) { body.innerHTML = '<div id="empty">no diagnosed faults yet</div>'; return; }
   const trs = [...rows].reverse().map(r => {
     const ev = r.event || {};
-    const badge = ev.confirmed ? 'CONFIRMED' : 'monitor';
-    const manual = ev.manual_trigger ? ' [manual]' : '';
+    const color = TRIGGER_COLORS[ev.trigger] || '#334155';
+    const manual = ev.manual_trigger ? ' <span style="color:#a78bfa">[manual]</span>' : '';
     const sig = SIG_ORDER.map(c => {
       const v = ev.signals && ev.signals[c];
-      return v != null ? `${SIG_LABELS[c][0]}: ${v.toFixed(1)}` : '';
-    }).join(', ');
+      const [lab, unit] = SIG_LABELS[c];
+      return v != null ? `<div>${lab}: ${v.toFixed(1)}${unit ? ' ' + unit : ''}</div>` : '<div></div>';
+    }).join('');
     return `<tr>
       <td>${(ev.start_ts || '').slice(0, 19).replace('T', ' ')}</td>
-      <td>${badge}${manual}</td>
+      <td><span class="badge" style="background:${color}">${(ev.trigger || '').replace('_', ' ')}</span>${manual}</td>
       <td>${ev.duration_s ?? ''}s${ev.confirm_lead_s ? ' (lead ' + ev.confirm_lead_s + 's)' : ''}</td>
-      <td>${sig}</td>
+      <td><div class="signals" style="margin:0">${sig}</div></td>
       <td class="cause">${r.cause || r.text || ''}</td>
       <td class="solution">${r.solution || ''}</td>
     </tr>`;
   }).join('');
   body.innerHTML = `<table><thead><tr>
-    <th>Time</th><th>Status</th><th>Duration</th><th>Signals</th>
+    <th>Time</th><th>Fault</th><th>Duration</th><th>Signals</th>
     <th>Possible cause</th><th>Possible solution</th>
   </tr></thead><tbody>${trs}</tbody></table>`;
 }
@@ -751,11 +923,22 @@ async function loadHistory() {
   }
 }
 
-function toggleHistory() {
-  historyOpen = !historyOpen;
-  document.getElementById('history').style.display = historyOpen ? 'block' : 'none';
-  document.getElementById('historyBtn').textContent = historyOpen ? 'hide history' : 'show history';
-  if (historyOpen) loadHistory();
+function openHistory() {
+  document.getElementById('historyOverlay').classList.add('open');
+  loadHistory();
+}
+
+function closeHistory() {
+  document.getElementById('historyOverlay').classList.remove('open');
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeHistory();
+});
+
+async function clearHistory() {
+  if (!confirm('Clear all event history? This cannot be undone.')) return;
+  try { await fetch('/api/history/clear', {method: 'POST'}); loadHistory(); } catch (e) {}
 }
 
 async function poll() {
@@ -801,6 +984,19 @@ def api_history():
             return jsonify([])
 
 
+@app.route("/api/history/clear", methods=["POST"])
+def api_history_clear():
+    """Wipe the persisted history file. Separate from /api/clear, which only
+    hides the live feed -- this permanently deletes the on-disk record."""
+    with STATE_LOCK:
+        try:
+            with open(HISTORY_PATH, "w") as f:
+                json.dump([], f)
+        except Exception as e:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
 @app.route("/api/clear", methods=["POST"])
 def api_clear():
     """Clear the visible event feed (the summaries) without disturbing the live
@@ -827,9 +1023,10 @@ def main():
                     help="IsolationForest outlier fraction; lower = fewer monitor events")
     ap.add_argument("--cusum-h", type=float, default=12.0,
                     help="CUSUM decision threshold; higher = less drift-sensitive (fewer monitors)")
-    ap.add_argument("--confirmed-only", action="store_true",
-                    help="Suppress statistical 'monitor' events entirely; only hard-breach / "
-                         "Button A events appear (cleanest feed for a busy demo)")
+    ap.add_argument("--confirmed-only", action=argparse.BooleanOptionalAction, default=True,
+                    help="Only hard-breach / Button A events appear (default -- cleanest feed "
+                         "for a busy demo). Pass --no-confirmed-only to also surface "
+                         "statistical-only MONITOR cards.")
     ap.add_argument("--baseline-seconds", type=float, default=8.0,
                     help="Seconds of at-rest sensor data to train the statistical models on")
     # The CPX streams ~10 Hz (vs the J1939 path's 1 Hz), so evidence is counted

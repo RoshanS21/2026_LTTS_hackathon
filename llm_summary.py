@@ -134,6 +134,11 @@ def call_llm(host, model, prompt, timeout):
         "system": SYSTEM_PROMPT,
         "prompt": prompt,
         "stream": False,
+        # Pin the model in RAM (Ollama default unloads after 5 idle minutes,
+        # so the first fault after a quiet spell paid a ~4-8s cold reload +
+        # prompt re-eval on this Pi -- measured 13.2s cold vs 9.5s warm).
+        # 1.4 GB resident is fine next to the dashboard's footprint.
+        "keep_alive": -1,
         "options": {"num_predict": NUM_PREDICT, "temperature": 0.2},
     }
     url = host.rstrip("/") + "/api/generate"

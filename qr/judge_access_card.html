@@ -1,0 +1,274 @@
+<title>Edge-ECU — Live Dashboard Access</title>
+<style>
+  :root {
+    --bg: #0b1120;
+    --bg-grid: rgba(79, 143, 255, 0.05);
+    --surface: #151f34;
+    --surface-line: #263351;
+    --plate: #ffffff;
+    --text: #e7ecf5;
+    --text-dim: #8b98b3;
+    --accent: #4f8fff;
+    --accent-soft: rgba(79, 143, 255, 0.14);
+    --good: #34d399;
+    --good-soft: rgba(52, 211, 153, 0.14);
+    --radius: 10px;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #eef1f7;
+      --bg-grid: rgba(47, 95, 214, 0.06);
+      --surface: #ffffff;
+      --surface-line: #dbe1ec;
+      --plate: #ffffff;
+      --text: #10182a;
+      --text-dim: #5b6b85;
+      --accent: #2f5fd6;
+      --accent-soft: rgba(47, 95, 214, 0.1);
+      --good: #0f9d68;
+      --good-soft: rgba(15, 157, 104, 0.1);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b1120;
+    --bg-grid: rgba(79, 143, 255, 0.05);
+    --surface: #151f34;
+    --surface-line: #263351;
+    --plate: #ffffff;
+    --text: #e7ecf5;
+    --text-dim: #8b98b3;
+    --accent: #4f8fff;
+    --accent-soft: rgba(79, 143, 255, 0.14);
+    --good: #34d399;
+    --good-soft: rgba(52, 211, 153, 0.14);
+  }
+  :root[data-theme="light"] {
+    --bg: #eef1f7;
+    --bg-grid: rgba(47, 95, 214, 0.06);
+    --surface: #ffffff;
+    --surface-line: #dbe1ec;
+    --plate: #ffffff;
+    --text: #10182a;
+    --text-dim: #5b6b85;
+    --accent: #2f5fd6;
+    --accent-soft: rgba(47, 95, 214, 0.1);
+    --good: #0f9d68;
+    --good-soft: rgba(15, 157, 104, 0.1);
+  }
+
+  * { box-sizing: border-box; }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 16px;
+    background:
+      radial-gradient(circle at 1px 1px, var(--bg-grid) 1px, transparent 1px) 0 0/22px 22px,
+      var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .mono {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+
+  .card {
+    width: 100%;
+    max-width: 720px;
+    background: var(--surface);
+    border: 1px solid var(--surface-line);
+    border-radius: calc(var(--radius) * 1.6);
+    padding: 36px clamp(20px, 5vw, 44px) 28px;
+    animation: rise 0.5s ease-out;
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  header { margin-bottom: 28px; }
+
+  .eyebrow {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 10px;
+  }
+
+  h1 {
+    font-size: clamp(1.35rem, 3.2vw, 1.7rem);
+    line-height: 1.25;
+    font-weight: 700;
+    margin: 0 0 12px;
+    text-wrap: balance;
+    max-width: 34ch;
+  }
+
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 0.78rem;
+    color: var(--good);
+    background: var(--good-soft);
+    padding: 4px 11px 4px 9px;
+    border-radius: 999px;
+    font-weight: 600;
+  }
+  .status .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--good);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 var(--good-soft); }
+    50% { opacity: 0.55; }
+  }
+
+  .steps {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+  }
+  @media (max-width: 560px) {
+    .steps { grid-template-columns: 1fr; }
+  }
+
+  .step {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    background: var(--accent-soft);
+    border: 1px solid var(--surface-line);
+    border-radius: var(--radius);
+    padding: 18px 18px 20px;
+  }
+
+  .step-label {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .step-num {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+  }
+  .step-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+
+  .plate {
+    background: var(--plate);
+    border-radius: calc(var(--radius) * 0.7);
+    padding: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+  }
+  .plate img {
+    display: block;
+    width: 100%;
+    max-width: 190px;
+    height: auto;
+    image-rendering: pixelated;
+  }
+
+  .fallback {
+    font-size: 0.76rem;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+  .fallback .val {
+    color: var(--text);
+    font-weight: 600;
+    word-break: break-all;
+  }
+  .fallback .k {
+    color: var(--text-dim);
+    display: inline-block;
+    min-width: 4.2em;
+  }
+
+  footer {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--surface-line);
+    font-size: 0.76rem;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  @media print {
+    body { padding: 0; background: white; }
+    .card { box-shadow: none; max-width: 100%; }
+  }
+</style>
+
+<div class="card">
+  <header>
+    <p class="eyebrow">Edge-AI Predictive Maintenance — Live Demo</p>
+    <h1>Scan to view the dashboard on your phone</h1>
+    <span class="status"><span class="dot"></span>Pi hotspot broadcasting — fully offline, no internet needed</span>
+  </header>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-label">
+        <span class="step-num mono">STEP 01</span>
+        <span class="step-title">Join the network</span>
+      </div>
+      <div class="plate">
+        <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUoAAAFKAQMAAABB54RGAAAABlBMVEUAAAD///+l2Z/dAAAAAnRSTlP//8i138cAAAAJcEhZcwAACxIAAAsSAdLdfvwAAAGuSURBVGiB7dnLrYQwDAVQSxQwJdE6JaUAJL/h+pfoSaOZVby4XiAgh5VxcILo1yGkpKQ/0SEe5zhUL8FBBGcxdJB2oYcn7hzwecA9DA3SRhSpszGR5dKfJO1J13SS9qWYPl+3HfR6fUgs6T6K8E/cG7wP8J/mV9JNVDxOq7vl4EHahVZkQT5hjeQUpB2otYp3No13tv2R02t+B0j30iPXYkmfROb0SdqIKpqPO5IIEBWIJ6eKJd1N0W0MT6w9iRE0JPLvHSDdTWNBdrv34hOJWlTSJtQy6Wsxn0NxhoFlaUa6nzqwktPYTfSFtHnSLnRET59fN8yXUZ++pCbtQWOq9Dvqm1R1Ob0DpNtp9R0ilUmvStJedMjU7Ec6PXxTWEi7UCRWomnMlVrsAs/NPul2mok9Yys48lyXStqEVoxj+sMiVnz2e4y0C62fK+ZjDI2krcqmTxzpZurNfvz7ikXaFYlddkhIt1MD6BytfawKRManxJI2oqq1ch7r30vSXnREs49P3BnTp9S6gLQBtcQ9Y5pbwTVzLmVIupnOcyNOqtn3HUYh7UK/DVJS0h/oH/2/nhVHYm8SAAAAAElFTkSuQmCC" alt="QR code to join the timtam WiFi network" width="330" height="330">
+      </div>
+      <p class="fallback">
+        <span class="k">SSID</span><span class="val mono">timtam</span><br>
+        <span class="k">Password</span><span class="val mono">maintain123</span>
+      </p>
+    </div>
+
+    <div class="step">
+      <div class="step-label">
+        <span class="step-num mono">STEP 02</span>
+        <span class="step-title">Open the dashboard</span>
+      </div>
+      <div class="plate">
+        <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAPoAAAD6AQMAAACyIsh+AAAABlBMVEUAAAD///+l2Z/dAAAAAnRSTlP//8i138cAAAAJcEhZcwAACxIAAAsSAdLdfvwAAAD9SURBVGiB7dfBDYMwDAVQSxmAkVg9I2UAJJc4tgMtTWNUcfo+UKCPy5eJA/GPIgCAx0EhrZW35u1GAoiBpKGu/Ux+CkAYSKw7qPkurGcrwG1QrwH+AYopgLvAXn8izstofQAYAh9JxfL+NrMAhqBX8du9AOaBtypZv4qSS4AI8Mq9VYsfAOZBi3ojG0QVtQkPEAbaoJK3bZP25AFiwPvVU5bk9QGAGGhlI0mT/1gfAMbgfZtEp0YGCADfunNdTdlTZoAwIP0w32xC0WmlBYiC1q+J9b+LL3eAOVCbNB8WAoAw0NdfaJ3r5+EOMAv6SPKDhH4xswBGYFwAAA+DF8Lc/hyIoWD6AAAAAElFTkSuQmCC" alt="QR code to open the live dashboard URL" width="250" height="250">
+      </div>
+      <p class="fallback">
+        <span class="k">URL</span><a class="val mono" href="http://timtam.box">http://timtam.box</a><br>
+        <span class="k">If that fails</span><a class="val mono" href="http://10.42.0.1">http://10.42.0.1</a>
+      </p>
+    </div>
+  </div>
+
+  <footer>
+    Two scans, not one — a WiFi QR can join a network, and a URL QR can open
+    a page, but no code does both at once, so we split it into a clean pair.
+    The dashboard runs entirely on the Raspberry Pi in your hand's reach —
+    no cloud, no external network, live sensor data end to end.
+  </footer>
+</div>

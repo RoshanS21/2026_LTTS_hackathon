@@ -65,7 +65,7 @@ HTTP_TIMEOUT = 600        # generous: a cold 3B model on a Pi can be slow
 SYSTEM_PROMPT = (
     "You are an on-vehicle maintenance assistant. Given a flagged sensor "
     "anomaly, reply in exactly two lines, terse and technical, no preamble "
-    "and no extra lines:\n"
+    "and no extra lines. Keep each line under 15 words:\n"
     "CAUSE: <one sentence stating the likely fault>\n"
     "SOLUTION: <one sentence stating the recommended action>"
 )

@@ -139,33 +139,124 @@ In a real deployment there's no laptop next to the machine, so the dashboard
 needs to be viewable from a phone with nothing but the Pi itself providing
 the network — no home WiFi, no internet required. The Pi hosts its own
 hotspot and resolves a plain hostname to itself, so a phone gets a clean URL
-with no IP address and no port:
+with no IP address and no port.
+
+**How it works:** the Pi's WiFi radio flips from *client* to *access point*
+(`nmcli device wifi hotspot`), broadcasting its own network instead of
+joining one; NetworkManager's hotspot mode already runs a small DNS server
+(`dnsmasq`) for connected clients, and one custom line tells it "when anyone
+asks for `timtam.box`, answer with the Pi's own address" — without that,
+the phone could only reach the dashboard by typing the raw IP. Running the
+dashboard on port 80 (the port browsers assume for a plain `http://` URL) is
+the only reason no `:5000` is needed either. Put together: phone joins
+`timtam` → asks the Pi's own DNS "where's `timtam.box`?" → Pi answers itself
+→ browser connects on port 80 → dashboard loads.
+
+**Current live values:**
+
+| | |
+|---|---|
+| WiFi SSID | `timtam` |
+| WiFi password | `maintain123` |
+| Dashboard URL (once phone has joined) | `http://timtam.box` |
+| Pi's hotspot IP | `10.42.0.1` |
+
+**If `http://timtam.box` doesn't load on some device** (seen once: worked
+immediately on a phone but not on a laptop, even after a hard refresh),
+**go straight to `http://10.42.0.1` instead** — it's the Pi's fixed hotspot
+IP, unaffected by whatever DNS setup that machine has (a manual DNS server,
+a VPN, a resolver that doesn't pick up the hotspot's DHCP-assigned DNS,
+etc.). The hostname depends on that device actually asking the Pi's own
+DNS server; the raw IP skips DNS lookup entirely, so it always works as
+long as the device has joined the `timtam` WiFi. Both devices just need to
+be on that WiFi (not Ethernet) for either address to be reachable.
+
+**One-time network setup** (already done on this Pi; shown here so it's
+reproducible on a fresh one):
 
 ```bash
-# One-time setup (see conversation/session notes for full detail):
 # 1. Pi broadcasts its own WiFi (needs a second network path, e.g. Ethernet,
 #    for your own management access -- the hotspot takes over wlan0):
-sudo nmcli device wifi hotspot ssid edge-ecu password "maintain123"
+sudo nmcli device wifi hotspot ssid timtam password "maintain123"
 
 # 2. Custom local DNS record so phones get a name instead of an IP
 #    (NetworkManager's hotspot already runs its own dnsmasq instance):
-echo "address=/edge-ecu.box/10.42.0.1" | sudo tee /etc/NetworkManager/dnsmasq-shared.d/dashboard.conf
+echo "address=/timtam.box/10.42.0.1" | sudo tee /etc/NetworkManager/dnsmasq-shared.d/dashboard.conf
 sudo nmcli connection down Hotspot && sudo nmcli connection up Hotspot
 
-# 3. Run the dashboard on port 80 (needs sudo) so the URL needs no port:
-sudo python3 cpx_dashboard.py --gpio --http-port 80
-#   (or: sudo python3 dashboard.py --port 80   for the simulated J1939 path)
+# 3. Make the hotspot start automatically on every boot (so this is a
+#    one-time step, not something to remember to run before each demo):
+sudo nmcli connection modify Hotspot connection.autoconnect yes
 ```
 
-Phone: join the `edge-ecu` WiFi, browse to **http://edge-ecu.box** — verified
-working live. The dashboard page also fires a phone-side alert (vibration +
-tone + screen flash) the moment a fault is confirmed, so the phone doesn't
-need to be actively watched to notice.
+**Run the dashboard so the phone can reach it — default is the live CPX
+data, not the simulated path:**
 
-**Known gap:** `cpx_dashboard.py` has no serial-reconnect logic. If the CPX's
-serial connection drops even once (a transient USB hiccup), the pipeline
-thread dies silently and the dashboard freezes on stale data until it's
-manually restarted — worth hardening before a long unattended run.
+```bash
+sudo python3 cpx_dashboard.py --gpio --http-port 80
+```
+
+- `sudo` — port 80 is a privileged port (<1024), needs root.
+- `--http-port 80` — so the phone's URL needs no `:5000` suffix.
+- `--gpio` — drives the real GPIO17 LED as the actuator (omit for the
+  ESP32-C6 servo path instead).
+- add `--no-open` when running headless over SSH (skips trying to open a
+  local browser tab).
+
+**Only if the live hardware chain fails on stage** — CPX unplugged, USB
+port dead, no time to debug — fall back to the simulated J1939 path
+instead, using its own flag name for the HTTP port (`--port`, not
+`--http-port` — the two scripts name this differently):
+
+```bash
+sudo python3 dashboard.py --port 80
+```
+
+This is the recorded-backup path (see "Two demo paths" above): it replays a
+committed synthetic dataset through the same detection core, not a live
+sensor. Don't run it side-by-side with `cpx_dashboard.py` on the same
+port — pick one.
+
+Phone: join the `timtam` WiFi, browse to **http://timtam.box**. The
+dashboard page also fires a phone-side alert (vibration + tone + screen
+flash) the moment a fault is confirmed, so the phone doesn't need to be
+actively watched to notice.
+
+**Does the WiFi stay up when the dashboard server is stopped?** Yes — they
+are fully independent. The hotspot is network infrastructure (a
+NetworkManager connection); the dashboard is an application process.
+Killing/restarting `cpx_dashboard.py` never touches the WiFi — a phone
+stays joined to `timtam` throughout, it just gets connection-refused until
+the dashboard process comes back. With `connection.autoconnect yes` (set
+above), the hotspot also survives a full Pi reboot with no manual command
+needed. The dashboard app itself is **not** auto-started on boot, and
+deliberately so: unlike the WiFi, it depends on the CPX being plugged in,
+warmed up, and healthy, and (see the known gap below) it has no
+self-recovery if its serial connection hiccups — auto-starting it blindly
+risks it silently dying with nobody noticing before a judge scans in. If
+unattended "plug in power, walk away" reliability is ever needed, the right
+fix is a `systemd` service with `Restart=on-failure` specifically for the
+dashboard process, not just relying on autostart.
+
+**For judges:** `qr/judge_access_card.html` is a self-contained display page
+with two QR codes — scan `qr/wifi_qr.png` to join `timtam`, then
+`qr/url_qr.png` to open the dashboard (a single code can't do both; a WiFi QR
+and a URL QR are different payload formats). Regenerate either if the SSID,
+password, or hostname ever changes:
+
+```bash
+qrencode -o qr/wifi_qr.png -s 10 -m 2 "WIFI:T:WPA;S:timtam;P:maintain123;;"
+qrencode -o qr/url_qr.png -s 10 -m 2 "http://timtam.box"
+```
+
+**Fixed: serial auto-reconnect.** `cpx_dashboard.py` used to have no
+recovery if the CPX's serial connection dropped even once — a transient
+USB/CDC hiccup (confirmed via `dmesg`: the board never actually
+re-enumerates, so it isn't a real unplug) would kill the pipeline thread
+silently and freeze the dashboard on stale data forever. It now retries the
+connection every 1.5 s until it succeeds again, with a visible
+`reconnecting` status on the page in the meantime — no manual restart
+needed.
 
 ## Software pipeline (recorded-backup path)
 
