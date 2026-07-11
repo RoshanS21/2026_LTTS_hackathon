@@ -65,10 +65,11 @@ CPX_LABELS = {
 # breach TEMP; resting mic RMS stays under ~200 while a clap/shout hits >1000.
 GRAVITY = 9.8
 VIBRATION_DEV_MAX = 8.0   # |accel_mag - GRAVITY| above this = abnormal motion
-TEMP_C_MAX = 34.0         # ambient/hand-warmth tops out ~30.5 C (see the
-                          # profiling note above), so a hairdryer a few
-                          # inches away is needed to breach this and trigger
-                          # a confirmed overheat alarm on stage
+TEMP_C_MAX = 32.0         # just above the ~30.5 C hand-warmth ceiling (see
+                          # the profiling note above) -- sustained firm
+                          # cupping may occasionally breach it, but a
+                          # hairdryer a few inches away is the reliable
+                          # trigger for a confirmed overheat alarm on stage
 SOUND_MAX = 1000.0        # loud acoustic event
 
 BASELINE_TEMP_C = 27.0    # typical warmed-up idle, for the prompt's context

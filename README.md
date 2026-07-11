@@ -217,6 +217,32 @@ sudo python3 cpx_dashboard.py --gpio --http-port 80
 - add `--no-open` when running headless over SSH (skips trying to open a
   local browser tab).
 
+**Stop it:** if it's running in the foreground (the command above, in a
+terminal you're watching), just `Ctrl+C`. If it's backgrounded (e.g.
+started with `nohup ... &` so it survives closing the terminal), stop it
+by matching its exact command line rather than a generic process name:
+
+```bash
+sudo pkill -f "cpx_dashboard.py --gpio --http-port 80"
+```
+
+To run it backgrounded in the first place (useful if you want it to
+survive an SSH disconnect):
+
+```bash
+sudo nohup python3 cpx_dashboard.py --gpio --no-open --http-port 80 > /tmp/cpx_dashboard.log 2>&1 &
+```
+
+Before starting a new instance, always confirm the port and the CPX serial
+port are actually free — a leftover process silently holding either one is
+the single most common cause of "it won't start" or "device disconnected /
+multiple access on port" errors:
+
+```bash
+sudo lsof -i :80
+sudo lsof /dev/ttyACM0
+```
+
 **Only if the live hardware chain fails on stage** — CPX unplugged, USB
 port dead, no time to debug — fall back to the simulated J1939 path
 instead, using its own flag name for the HTTP port (`--port`, not

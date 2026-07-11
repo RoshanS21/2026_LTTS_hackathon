@@ -584,10 +584,10 @@ PAGE = """
   h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em;
        color: #64748b; margin: 20px 0 8px; }
   #clearBtn { float: right; text-transform: none; letter-spacing: normal;
-              font-size: 0.72rem; font-weight: 600; color: #cbd5e1;
-              background: #334155; border: none; border-radius: 6px;
-              padding: 3px 10px; cursor: pointer; }
-  #clearBtn:hover { background: #475569; }
+              font-size: 1rem; font-weight: 700; color: #f1f5f9;
+              background: #334155; border: 1px solid #475569; border-radius: 8px;
+              padding: 7px 16px; cursor: pointer; }
+  #clearBtn:hover { background: #475569; border-color: #64748b; }
   #sub { color: #94a3b8; font-size: 0.85rem; margin-bottom: 12px; }
   #status { display: inline-block; padding: 3px 10px; border-radius: 999px;
             font-size: 0.75rem; font-weight: 600; }
@@ -626,10 +626,11 @@ PAGE = """
   .summary.solution { color: #a7f3d0; border-left: 2px solid #10b981;
                        padding-left: 8px; margin-top: 4px; }
   .meta { font-size: 0.72rem; color: #64748b; margin-top: 8px; }
-  #historyBtn { text-transform: none; letter-spacing: normal; font-size: 0.72rem;
-                font-weight: 600; color: #cbd5e1; background: #334155; border: none;
-                border-radius: 6px; padding: 3px 10px; cursor: pointer; margin-left: 6px; }
-  #historyBtn:hover { background: #475569; }
+  #historyBtn { text-transform: none; letter-spacing: normal; font-size: 0.85rem;
+                font-weight: 700; color: #f1f5f9; background: #334155;
+                border: 1px solid #475569; border-radius: 8px;
+                padding: 7px 16px; cursor: pointer; margin-left: 8px; }
+  #historyBtn:hover { background: #475569; border-color: #64748b; }
   #empty { color: #64748b; font-style: italic; }
   /* History as a full-screen overlay dialog, not an inline section -- it has
      its own scroll region so opening it never makes the main page scroll. */
@@ -738,7 +739,7 @@ const STATUS_COLORS = {starting:'#475569', connecting:'#475569', baseline:'#0891
 // [label, unit, bound, kind]; vibration bound is the upper gravity+dev line.
 const SIG_LABELS = {
   accel_mag_ms2: ['Vibration |accel|', 'm/s\\u00b2', 17.8, 'over'],
-  temp_c: ['Temperature', '\\u00b0C', 34, 'over'],
+  temp_c: ['Temperature', '\\u00b0C', 32, 'over'],
   sound_level: ['Acoustic (mic RMS)', '', 1000, 'over'],
 };
 const SIG_ORDER = Object.keys(SIG_LABELS);
